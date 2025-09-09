@@ -12,8 +12,8 @@ from cm_kan import cli
 
 def add_parser(subparser: argparse) -> None:
     parser = subparser.add_parser(
-        "create-dataset",
-        help="Create dataset",
+        "data-create",
+        help="Create volga2k dataset",
         formatter_class=cli.ArgumentDefaultsRichHelpFormatter,
     )
     parser.add_argument(
@@ -167,8 +167,8 @@ def generate_dataset(args: argparse.Namespace) -> None:
         raise Exception(f"No such directory: {input_src_img_dir}")
     if not input_ref_img_dir.is_dir():
         raise Exception(f"No such directory: {input_ref_img_dir}")
-    if input_feature_dir is not None and not input_ref_img_dir.is_dir():
-        raise Exception(f"No such directory: {input_ref_img_dir}")
+    if input_feature_dir is not None and not input_feature_dir.is_dir():
+        raise Exception(f"No such directory: {input_feature_dir}")
 
     save_test_src_dir = output_dir.joinpath("test", "source")
     save_test_ref_dir = output_dir.joinpath("test", "target")
