@@ -1,4 +1,4 @@
-experiment: huawei_paired
+experiment: volga2k_paired
 save_dir: experiments
 resume: True
 accelerator: 'gpu'
