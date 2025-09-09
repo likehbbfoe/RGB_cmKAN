@@ -72,14 +72,9 @@ if __name__ == "__main__":
         help="Rich and poor are mutually exclusive. Choose either one but not both.",
     )
     mutex.add_argument(
-        "--poor",
-        action="store_false",
-        dest="rich",
-        help="Does poor mean --not-rich 😉?",
+        "--poor", action="store_false", dest="rich", help="Does poor mean --not-rich 😉?"
     )
-    mutex.add_argument(
-        "--not-rich", action="store_false", dest="rich", help=argparse.SUPPRESS
-    )
+    mutex.add_argument("--not-rich", action="store_false", dest="rich", help=argparse.SUPPRESS)
     parser.add_argument(
         "--generate-rich-argparse-preview",
         action=HelpPreviewAction,

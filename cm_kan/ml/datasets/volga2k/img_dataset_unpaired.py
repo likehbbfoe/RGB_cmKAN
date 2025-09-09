@@ -7,15 +7,14 @@ from cm_kan.ml.transforms.pair_trransform import PairTransform
 
 
 class Image2ImageUnpairedDataset(Dataset):
-    def __init__(
-        self,
-        paths_ab_recolor: List[str],
-        paths_a: List[str],
-        paths_ba_recolor: List[str],
-        paths_b: List[str],
-        transform: Compose,
-        p_transform: PairTransform = None,
-    ) -> None:
+    def __init__(self, 
+            paths_ab_recolor: List[str],
+            paths_a: List[str],
+            paths_ba_recolor: List[str],
+            paths_b: List[str],
+            transform: Compose, 
+            p_transform: PairTransform = None
+        ) -> None:
         assert len(paths_a) == len(paths_b), "paths_a and paths_b must have same length"
         self.paths_a = paths_a
         self.paths_ab_recolor = paths_ab_recolor
@@ -29,7 +28,7 @@ class Image2ImageUnpairedDataset(Dataset):
         x_recolor = read_rgb_image(path)
         if self.transform is not None:
             x_recolor = self.transform(x_recolor)
-
+        
         path = self.paths_a[idx]
         x = read_rgb_image(path)
         if self.transform is not None:
@@ -39,6 +38,7 @@ class Image2ImageUnpairedDataset(Dataset):
         y_recolor = read_rgb_image(path)
         if self.transform is not None:
             y_recolor = self.transform(y_recolor)
+        
 
         path = self.paths_b[idx]
         y = read_rgb_image(path)

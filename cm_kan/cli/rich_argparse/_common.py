@@ -37,9 +37,7 @@ def _initialize_win_colors() -> bool:  # pragma: no cover
             try:
                 import colorama
 
-                _windows_console_fixed = isinstance(
-                    sys.stdout, colorama.ansitowin32.StreamWrapper
-                )
+                _windows_console_fixed = isinstance(sys.stdout, colorama.ansitowin32.StreamWrapper)
             except Exception:
                 _windows_console_fixed = False
         else:
