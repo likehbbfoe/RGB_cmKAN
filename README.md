@@ -1,5 +1,9 @@
 # Color Matching Using Hypernetwork-Based Kolmogorov-Arnold Networks
 
+[🇷🇺 Russian language (Русский язык)](README_RU.md)
+
+Authors: Artem Nikonorov, Georgy Perevozchikov, Andrei Korepanov, Nancy Mehta, Mahmoud Afifi, Egor Ershov, Radu Timofte.
+
 ![abstract](figures/abstract.png)
 
 ### Abstract
