@@ -13,8 +13,8 @@ from cm_kan import cli
 
 def add_parser(subparser: argparse) -> None:
     parser = subparser.add_parser(
-        "create-dataset",
-        help="Create dataset",
+        "data-create",
+        help="Create volga2k dataset",
         formatter_class=cli.ArgumentDefaultsRichHelpFormatter,
     )
     parser.add_argument(
@@ -83,8 +83,7 @@ def add_parser(subparser: argparse) -> None:
     parser.set_defaults(func=generate_dataset)
 
 
-def parallel(f):
-
+def parallel(f) -> callable:
     def wrapped(*args, **kwargs):
         return asyncio.get_event_loop().run_in_executor(
             None, f, *args, **kwargs)
@@ -115,8 +114,7 @@ def _prepare_data(
     progress: Progress,
     pb: TaskID,
     args,
-):
-
+) -> None:
     source_path = input_src_img_dir.joinpath(name)
     if not source_path.is_file():
         raise Exception('No source file')
