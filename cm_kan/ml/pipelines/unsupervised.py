@@ -278,11 +278,11 @@ class UnsupervisedPipeline(L.LightningModule):
         inputs, targets = batch
         predictions = self(inputs)
         mae_loss = self.mae_loss(predictions, targets)
-        panr_metric = self.psnr_metric(predictions, targets)
+        psnr_metric = self.psnr_metric(predictions, targets)
         ssim_metric = self.ssim_metric(predictions, targets)
         de_metric = self.de_metric(predictions, targets)
         
-        self.log('test_panr', panr_metric, prog_bar=True, logger=True)
+        self.log('test_psnr', psnr_metric, prog_bar=True, logger=True)
         self.log('test_ssim', ssim_metric, prog_bar=True, logger=True)
         self.log('test_de', de_metric, prog_bar=True, logger=True)
         self.log('test_loss', mae_loss, prog_bar=True, logger=True)
