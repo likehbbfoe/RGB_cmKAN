@@ -21,7 +21,8 @@ class UnsupervisedPipeline(L.LightningModule):
         lr: float = 1e-3,
         weight_decay: float = 0,
         pretrained: bool = False,
-        pretrained_model: str = None
+        pretrained_model: str = None,
+        reverse_prediction: bool = False,
     ) -> None:
         super(UnsupervisedPipeline, self).__init__()
 
@@ -41,8 +42,9 @@ class UnsupervisedPipeline(L.LightningModule):
         if pretrained:
             self.automatic_optimization = False
             self.pretrained_model = pretrained_model
-        
-        self.save_hyperparameters(ignore=['model'])
+        self.reverse_prediction = reverse_prediction
+
+        self.save_hyperparameters(ignore=['model', 'reverse_prediction'])
 
     def _identity_loss(self, predictions, targets):
         mae_loss = self.mae_loss(predictions, targets)
@@ -121,6 +123,11 @@ class UnsupervisedPipeline(L.LightningModule):
             Logger.info('Model is in [bold green]CycleGAN training[/bold green] mode.')
         else:
             Logger.info('Model is in [bold green]Generator pre-training[/bold green] mode.')
+
+        if self.reverse_prediction:
+            Logger.info('Model is in [bold green]Reversed prediction (b -> a)[/bold green] mode.')
+        elif not self.reverse_prediction:
+            Logger.info('Model is in [bold green]Normal prediction (a -> b)[/bold green] mode.')
 
     def configure_optimizers(self):
         if not self.pretrained:
@@ -275,8 +282,12 @@ class UnsupervisedPipeline(L.LightningModule):
         return {'loss': mae_loss}
     
     def test_step(self, batch, batch_idx):
-        inputs, targets = batch
-        predictions = self(inputs)
+        if self.reverse_prediction:
+            targets, inputs = batch
+            predictions = self.reversed_forward(inputs)
+        else:
+            inputs, targets = batch
+            predictions = self(inputs)
         mae_loss = self.mae_loss(predictions, targets)
         psnr_metric = self.psnr_metric(predictions, targets)
         ssim_metric = self.ssim_metric(predictions, targets)
@@ -289,6 +300,10 @@ class UnsupervisedPipeline(L.LightningModule):
         return {'loss': mae_loss}
     
     def predict_step(self, batch, batch_idx):
-        pathes, inputs = batch
-        output = self(inputs)
+        if self.reverse_prediction:
+            pathes, inputs = batch
+            output = self.reversed_forward(inputs)
+        else:
+            pathes, inputs = batch
+            output = self(inputs)
         return output

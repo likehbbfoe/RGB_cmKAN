@@ -41,6 +41,12 @@ def add_parser(subparser: argparse) -> None:
         default="logs/checkpoints/last.ckpt",
         required=False,
     )
+    parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Reverse the direction of color transfer (for unpaired scenario only)",
+        required=False,
+    )
 
     parser.set_defaults(func=test)
 
@@ -59,7 +65,7 @@ def test(args: argparse.Namespace) -> None:
     
     dm = DataSelector.select(config)
     model = ModelSelector.select(config)
-    pipeline = PipelineSelector.select(config, model)
+    pipeline = PipelineSelector.select(config, model, reverse_prediction=args.reverse)
 
     logger = CSVLogger(
         save_dir=os.path.join(config.save_dir, config.experiment),

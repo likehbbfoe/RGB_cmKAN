@@ -13,7 +13,7 @@ from cm_kan.ml.models import (
 
 
 class PipelineSelector:
-    def select(config: Config, model: Union[CmKAN, LightCmKAN]) -> Union[SupervisedPipeline, UnsupervisedPipeline, PairBasedPipeline]:
+    def select(config: Config, model: Union[CmKAN, LightCmKAN], reverse_prediction: bool = False) -> Union[SupervisedPipeline, UnsupervisedPipeline, PairBasedPipeline]:
         match config.pipeline.type:
             case PipelineType.supervised:
                 return SupervisedPipeline(
@@ -30,6 +30,7 @@ class PipelineSelector:
                     weight_decay=config.pipeline.params.weight_decay,
                     pretrained=config.pipeline.params.pretrained,
                     pretrained_model=config.pipeline.params.pretrained_model,
+                    reverse_prediction=reverse_prediction,
                 )
             case PipelineType.pair_based:
                 return PairBasedPipeline(

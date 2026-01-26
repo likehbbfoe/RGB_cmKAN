@@ -67,6 +67,12 @@ def add_parser(subparser: argparse) -> None:
         default=1,
         required=False,
     )
+    parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Reverse the direction of color transfer (for unpaired scenario only)",
+        required=False,
+    )
 
     parser.set_defaults(func=predict)
 
@@ -97,7 +103,7 @@ def predict(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
     )
     model = ModelSelector.select(config)
-    pipeline = PipelineSelector.select(config, model)
+    pipeline = PipelineSelector.select(config, model, reverse_prediction=args.reverse)
 
     logger = CSVLogger(
         save_dir=os.path.join(config.save_dir, config.experiment),
