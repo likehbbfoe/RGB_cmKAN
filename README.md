@@ -17,7 +17,7 @@ Create a conda (or python) environment, clone the repository and install the req
 ```bash
 # 1. Create an environment
 
-conda create -n cmKAN python=3.13 pip
+conda create -n cmKAN python=3.10 pip
 conda activate cmKAN
 # or
 python -m venv .venv
@@ -53,6 +53,49 @@ We provide pre-trained models for the following tasks:
 | [Adobe 5K](https://pan.baidu.com/share/init?surl=CsQRFsEPZCSjkT3Z1X_B1w) (password: `5fyk`)| sRGB-to-sRGB | [supervised](configs/) | [checkpoint](https://github.com/gosha20777/cmKAN/releases) |
 | [Samsung2Iphone](https://github.com/mahmoudnafifi/raw2raw) | raw-to-raw | [unsupervised](configs/) | [checkpoint](https://github.com/gosha20777/cmKAN/releases) |
 | [Zurich raw-to-sRGB](https://people.ee.ethz.ch/~ihnatova/pynet.html) | raw-to-sRGB | [supervised](configs/) | [checkpoint](https://github.com/gosha20777/cmKAN/releases) |
+
+## Training on a Custom Unpaired Dataset
+
+Put the two independent image domains under one dataset root. Source and target
+do not need matching filenames or the same number of images:
+
+```text
+data/my_dataset/
+├── train/
+│   ├── source/
+│   │   ├── image_001.jpg
+│   │   └── ...
+│   └── target/
+│       ├── another_name.png
+│       └── ...
+└── val/
+    ├── source/
+    └── target/
+```
+
+Run the provided training script:
+
+```bash
+./scripts/train_custom_unpaired.sh data/my_dataset
+```
+
+Domain directory names can be supplied when they are not `source` and `target`.
+For example, a Samsung-to-iPhone dataset can be launched with:
+
+```bash
+./scripts/train_custom_unpaired.sh data/my_dataset samsung iphone
+```
+
+If a train domain contains a `real/` subdirectory, the script selects it and
+does not mix in a sibling `recolor/` directory. An existing validation split is
+used directly; only datasets without `val/` fall back to automatic splitting.
+If `test/` is absent, test-time evaluation reuses `val/`.
+
+The loader recursively discovers common image formats. Training uses resize,
+random crop, and horizontal/vertical flip augmentation. Color-changing
+augmentation is omitted because it would alter the source and target color
+distributions. Adjust image size, split ratios, batch size, and training length in
+`configs/custom_unpaired.example.yaml`.
 
 
 

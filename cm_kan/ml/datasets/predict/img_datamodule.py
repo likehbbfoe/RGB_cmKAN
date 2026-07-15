@@ -4,9 +4,8 @@ import torch
 import lightning as L
 from torchvision.transforms.v2 import (
     Compose,
-    ToImage,
-    ToDtype,
-    Resize,
+    ConvertImageDtype,
+    ToImageTensor,
 )
 from torch.utils.data import DataLoader
 from typing import Tuple
@@ -46,8 +45,8 @@ class ImgPredictDataModule(L.LightningDataModule):
 
 
         self.image_transform = Compose([
-            ToImage(),
-            ToDtype(dtype=torch.float32, scale=True),
+            ToImageTensor(),
+            ConvertImageDtype(dtype=torch.float32),
         ])
         self.num_workers = num_workers
         self.batch_size = batch_size
@@ -72,4 +71,3 @@ class ImgPredictDataModule(L.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=False,
         )
-    

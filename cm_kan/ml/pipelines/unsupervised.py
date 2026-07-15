@@ -1,5 +1,7 @@
-import torch
 import itertools
+from collections.abc import Mapping
+
+import torch
 from torch import nn
 from torch.nn import functional as F
 import lightning as L
@@ -22,6 +24,7 @@ class UnsupervisedPipeline(L.LightningModule):
         weight_decay: float = 0,
         pretrained: bool = False,
         pretrained_model: str = None,
+        training_mode: str = 'pretrain',
         reverse_prediction: bool = False,
     ) -> None:
         super(UnsupervisedPipeline, self).__init__()
@@ -39,9 +42,13 @@ class UnsupervisedPipeline(L.LightningModule):
         self.ssim_metric = SSIM(data_range=(0, 1))
         self.psnr_metric = PSNR(data_range=(0, 1))
         self.pretrained = pretrained
-        if pretrained:
+        self.pretrained_model = pretrained_model
+        normalized_training_mode = getattr(training_mode, "value", training_mode)
+        self.adversarial = normalized_training_mode == 'adversarial' or pretrained
+        if self.adversarial:
             self.automatic_optimization = False
-            self.pretrained_model = pretrained_model
+        if self.pretrained and not self.pretrained_model:
+            raise ValueError("pretrained_model is required when pretrained is true")
         self.reverse_prediction = reverse_prediction
 
         self.save_hyperparameters(ignore=['model', 'reverse_prediction'])
@@ -111,7 +118,8 @@ class UnsupervisedPipeline(L.LightningModule):
                     optimiser=self.optimizer_type,
                     lr=self.lr,
                     weight_decay=self.weight_decay,
-                    pretrained=False
+                    pretrained=False,
+                    training_mode='pretrain',
                 )
                 self.model.gen_ab = pipeline.model.gen_ab
                 self.model.gen_ba = pipeline.model.gen_ba
@@ -119,7 +127,7 @@ class UnsupervisedPipeline(L.LightningModule):
                 Logger.info(f'Initialized model weights {self.pretrained_model}.')
         
         Logger.info('Initialized model weights with [bold green]Unsupervised[/bold green] pipeline.')
-        if self.pretrained:
+        if self.adversarial:
             Logger.info('Model is in [bold green]CycleGAN training[/bold green] mode.')
         else:
             Logger.info('Model is in [bold green]Generator pre-training[/bold green] mode.')
@@ -130,7 +138,7 @@ class UnsupervisedPipeline(L.LightningModule):
             Logger.info('Model is in [bold green]Normal prediction (a -> b)[/bold green] mode.')
 
     def configure_optimizers(self):
-        if not self.pretrained:
+        if not self.adversarial:
             if self.optimizer_type == 'adam':
                 optimizer = optim.Adam(itertools.chain(self.model.gen_ab.parameters(), self.model.gen_ba.parameters()),
                             lr=self.lr, weight_decay=self.weight_decay)
@@ -144,16 +152,20 @@ class UnsupervisedPipeline(L.LightningModule):
             if self.optimizer_type == 'adam':
                 optG = optim.Adam(
                     itertools.chain(self.model.gen_ab.parameters(), self.model.gen_ba.parameters()),
-                    lr=2e-4, betas=(0.5, 0.999)
+                    lr=self.lr,
+                    betas=(0.5, 0.999),
+                    weight_decay=self.weight_decay,
                 )
 
                 optD = optim.Adam(
                     itertools.chain(self.model.dis_a.parameters(), self.model.dis_b.parameters()),
-                    lr=2e-4, betas=(0.5, 0.999)
+                    lr=self.lr,
+                    betas=(0.5, 0.999),
+                    weight_decay=self.weight_decay,
                 )
             else:
                 raise ValueError(f'unsupported optimizer_type: {self.optimizer_type}')
-            gamma = lambda epoch: 1 - max(0, epoch + 1 - 100) / 101
+            gamma = lambda epoch: max(0.0, 1 - max(0, epoch + 1 - 100) / 101)
             schG = optim.lr_scheduler.LambdaLR(optG, lr_lambda=gamma)
             schD = optim.lr_scheduler.LambdaLR(optD, lr_lambda=gamma)
             return [optG, optD], [schG, schD]
@@ -233,14 +245,49 @@ class UnsupervisedPipeline(L.LightningModule):
         self.log('pretrain_loss', loss.item(), prog_bar=True, logger=True)
         return loss
 
+    @staticmethod
+    def _unpack_adversarial_batch(batch):
+        if isinstance(batch, Mapping):
+            return batch['source'], batch['target']
+        if len(batch) == 4:
+            _, source, _, target = batch
+            return source, target
+        if len(batch) == 2:
+            return batch
+        raise ValueError(
+            "Adversarial training expects a source/target mapping, a two-item "
+            "batch, or the legacy four-item recolor batch"
+        )
+
+    def _unpaired_evaluation_step(self, batch, stage: str):
+        source, target = self._unpack_adversarial_batch(batch)
+        cycled_source = self.model.gen_ba(self.model.gen_ab(source))
+        cycled_target = self.model.gen_ab(self.model.gen_ba(target))
+        same_source = self.model.gen_ba(source)
+        same_target = self.model.gen_ab(target)
+
+        cycle_loss = (
+            self._cycle_loss(cycled_source, source)
+            + self._cycle_loss(cycled_target, target)
+        )
+        identity_loss = (
+            self._identity_loss(same_source, source)
+            + self._identity_loss(same_target, target)
+        )
+        loss = cycle_loss + 0.5 * identity_loss
+        self.log(f'{stage}_cycle_loss', cycle_loss, prog_bar=False, logger=True)
+        self.log(f'{stage}_identity_loss', identity_loss, prog_bar=False, logger=True)
+        self.log(f'{stage}_loss', loss, prog_bar=True, logger=True)
+        return {'loss': loss}
+
 
     def training_step(self, batch, batch_idx):
-        img_ab_recolorized, img_a, img_ba_recolorized, img_b = batch
-
-        if not self.pretrained:
+        if not self.adversarial:
+            img_ab_recolorized, img_a, img_ba_recolorized, img_b = batch
             loss = self.generator_pretaining_step(img_ab_recolorized, img_a, img_ba_recolorized, img_b)
             return {'loss': loss}
         else:
+            img_a, img_b = self._unpack_adversarial_batch(batch)
             opt_gen, opt_disc = self.optimizers()
             sch_gen, sch_disc = self.lr_schedulers()
             
@@ -268,6 +315,9 @@ class UnsupervisedPipeline(L.LightningModule):
             return
     
     def validation_step(self, batch, batch_idx):
+        if isinstance(batch, Mapping):
+            return self._unpaired_evaluation_step(batch, stage='val')
+
         inputs, targets = batch
         predictions = self(inputs)
         mae_loss = self.mae_loss(predictions, targets)
@@ -282,6 +332,9 @@ class UnsupervisedPipeline(L.LightningModule):
         return {'loss': mae_loss}
     
     def test_step(self, batch, batch_idx):
+        if isinstance(batch, Mapping):
+            return self._unpaired_evaluation_step(batch, stage='test')
+
         if self.reverse_prediction:
             targets, inputs = batch
             predictions = self.reversed_forward(inputs)

@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 from lightning.pytorch.callbacks import Callback
 from lightning import LightningModule, Trainer
 import torch
@@ -16,9 +18,15 @@ class GenerateCallback(Callback):
         self.save_dir = None
         self.target_imgs = None
 
+    @staticmethod
+    def _unpack_batch(batch):
+        if isinstance(batch, Mapping):
+            return batch["source"], batch["target"]
+        return batch
+
     def on_train_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         dataloader = trainer.val_dataloaders
-        self.input_imgs, self.target_imgs = next(iter(dataloader))
+        self.input_imgs, self.target_imgs = self._unpack_batch(next(iter(dataloader)))
         self.input_imgs = self.input_imgs.to(pl_module.device)
         self.target_imgs = self.target_imgs.to(pl_module.device)
         self.save_dir = os.path.join(trainer.log_dir, 'figures')
@@ -40,7 +48,7 @@ class GenerateCallback(Callback):
 
     def on_test_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         dataloader = trainer.test_dataloaders
-        self.input_imgs, self.target_imgs = next(iter(dataloader))
+        self.input_imgs, self.target_imgs = self._unpack_batch(next(iter(dataloader)))
         self.input_imgs = self.input_imgs.to(pl_module.device)
         self.target_imgs = self.target_imgs.to(pl_module.device)
         self.save_dir = os.path.join(trainer.log_dir, 'figures')

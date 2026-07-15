@@ -1,0 +1,104 @@
+from pathlib import Path
+
+import imageio.v3 as imageio
+import numpy as np
+import torch
+
+from cm_kan.cli.train import _domain_path
+from cm_kan.ml.datasets.custom_unpaired import CustomUnpairedDataModule
+from cm_kan.ml.datasets.custom_unpaired.img_dataset import _ensure_rgb
+
+
+def _write_images(directory: Path, count: int, offset: int) -> None:
+    directory.mkdir(parents=True)
+    for index in range(count):
+        value = (offset + index * 10) % 256
+        image = np.full((24, 32, 3), value, dtype=np.uint8)
+        imageio.imwrite(directory / f"image_{index}.png", image)
+
+
+def test_custom_unpaired_data_module_loads_unequal_domains(tmp_path: Path) -> None:
+    source_dir = tmp_path / "source"
+    target_dir = tmp_path / "target"
+    _write_images(source_dir, count=7, offset=0)
+    _write_images(target_dir, count=5, offset=100)
+
+    data_module = CustomUnpairedDataModule(
+        source_dir=str(source_dir),
+        target_dir=str(target_dir),
+        batch_size=2,
+        val_batch_size=1,
+        test_batch_size=1,
+        crop_size=16,
+        resize_size=20,
+        val_fraction=0.2,
+        test_fraction=0.2,
+        horizontal_flip_probability=0.5,
+        num_workers=0,
+        seed=7,
+    )
+    data_module.setup()
+
+    batch = next(iter(data_module.train_dataloader()))
+    assert set(batch) == {"source", "target"}
+    assert batch["source"].shape == (2, 3, 16, 16)
+    assert batch["target"].shape == (2, 3, 16, 16)
+    assert batch["source"].dtype == torch.float32
+    assert batch["target"].dtype == torch.float32
+    assert 0 <= batch["source"].min() <= batch["source"].max() <= 1
+    assert 0 <= batch["target"].min() <= batch["target"].max() <= 1
+
+    first_eval_sample = data_module.val_dataset[0]
+    second_eval_sample = data_module.val_dataset[0]
+    assert torch.equal(first_eval_sample["source"], second_eval_sample["source"])
+    assert torch.equal(first_eval_sample["target"], second_eval_sample["target"])
+
+
+def test_uint16_images_are_normalized_before_torchvision(tmp_path: Path) -> None:
+    image = np.full((8, 10, 3), 65535, dtype=np.uint16)
+    normalized = _ensure_rgb(image, tmp_path / "16_bit.tiff")
+
+    assert normalized.dtype == np.float32
+    assert normalized.flags.c_contiguous
+    assert normalized.min() == normalized.max() == 1.0
+
+
+def test_explicit_validation_split_is_used_without_resplitting(tmp_path: Path) -> None:
+    train_source = tmp_path / "train" / "source"
+    train_target = tmp_path / "train" / "target"
+    val_source = tmp_path / "val" / "source"
+    val_target = tmp_path / "val" / "target"
+    _write_images(train_source, count=7, offset=0)
+    _write_images(train_target, count=5, offset=100)
+    _write_images(val_source, count=2, offset=20)
+    _write_images(val_target, count=3, offset=120)
+
+    data_module = CustomUnpairedDataModule(
+        source_dir=str(train_source),
+        target_dir=str(train_target),
+        val_source_dir=str(val_source),
+        val_target_dir=str(val_target),
+        crop_size=16,
+        resize_size=20,
+        num_workers=0,
+    )
+
+    assert len(data_module.train_source_paths) == 7
+    assert len(data_module.train_target_paths) == 5
+    assert len(data_module.val_source_paths) == 2
+    assert len(data_module.val_target_paths) == 3
+    assert data_module.test_source_paths == data_module.val_source_paths
+    assert data_module.test_target_paths == data_module.val_target_paths
+
+
+def test_data_root_layout_prefers_train_real_directory(tmp_path: Path) -> None:
+    train_domain = tmp_path / "train" / "samsung"
+    (train_domain / "real").mkdir(parents=True)
+    (train_domain / "recolor").mkdir()
+    val_domain = tmp_path / "val" / "samsung"
+    val_domain.mkdir(parents=True)
+
+    assert _domain_path(str(tmp_path), "train", "samsung") == str(
+        train_domain / "real"
+    )
+    assert _domain_path(str(tmp_path), "val", "samsung") == str(val_domain)

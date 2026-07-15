@@ -4,9 +4,9 @@ import torch
 import lightning as L
 from torchvision.transforms.v2 import (
     Compose,
-    ToImage,
-    ToDtype,
+    ConvertImageDtype,
     Resize,
+    ToImageTensor,
 )
 from torch.utils.data import DataLoader
 from typing import Tuple
@@ -85,19 +85,19 @@ class FiveKImgDataModule(L.LightningDataModule):
         self.test_batch_size = test_batch_size
 
         self.image_train_transform = Compose([
-            ToImage(),
-            Resize((480,720)),
-            ToDtype(dtype=torch.float32, scale=True),
+            ToImageTensor(),
+            Resize((480, 720), antialias=True),
+            ConvertImageDtype(dtype=torch.float32),
         ])
         self.image_val_transform = Compose([
-            ToImage(),
-            Resize((480,720)),
-            ToDtype(dtype=torch.float32, scale=True),
+            ToImageTensor(),
+            Resize((480, 720), antialias=True),
+            ConvertImageDtype(dtype=torch.float32),
         ])
         self.image_test_transform = Compose([
-            ToImage(),
-            Resize((480,720)),
-            ToDtype(dtype=torch.float32, scale=True),
+            ToImageTensor(),
+            Resize((480, 720), antialias=True),
+            ConvertImageDtype(dtype=torch.float32),
         ])
         self.num_workers = num_workers
 

@@ -1,0 +1,51 @@
+experiment: custom_unpaired
+save_dir: experiments
+resume: false
+accelerator: auto
+
+model:
+  type: cycle_cm_kan
+  params:
+    in_dims:
+      - 3
+    out_dims:
+      - 3
+    grid_size: 5
+    spline_order: 3
+    residual_std: 0.1
+    grid_range:
+      - 0.0
+      - 1.0
+
+data:
+  type: custom_unpaired
+  train:
+    source: data/custom_unpaired/train/source
+    target: data/custom_unpaired/train/target
+  val:
+    source: data/custom_unpaired/val/source
+    target: data/custom_unpaired/val/target
+  params:
+    crop_size: 32
+    resize_size: 36
+    horizontal_flip_probability: 0.5
+    vertical_flip_probability: 0.0
+    num_workers: 4
+    recursive: true
+    seed: 42
+
+pipeline:
+  type: unsupervised
+  params:
+    optimizer: adam
+    lr: 0.0002
+    weight_decay: 0.0
+    batch_size: 2
+    val_batch_size: 2
+    test_batch_size: 2
+    epochs: 200
+    save_freq: 10
+    visualize_freq: 5
+    training_mode: adversarial
+    pretrained: false
+    pretrained_model:

@@ -1,12 +1,17 @@
 from enum import Enum
 from pydantic import BaseModel
-from typing import Union
+from typing import Optional, Union
 
 
 class PipelineType(str, Enum):
     supervised   = 'supervised'
     unsupervised = 'unsupervised'
     pair_based   = 'pair_based'
+
+
+class UnsupervisedTrainingMode(str, Enum):
+    pretrain = 'pretrain'
+    adversarial = 'adversarial'
     
 
 class PipelineParams(BaseModel):
@@ -30,7 +35,8 @@ class PairBasedPipelineParams(DefaultPipelineParams):
 
 class UnsupervisedPipelineParams(DefaultPipelineParams):
     pretrained: bool
-    pretrained_model: str
+    pretrained_model: Optional[str]
+    training_mode: UnsupervisedTrainingMode = UnsupervisedTrainingMode.pretrain
 
 
 class Pipeline(BaseModel):

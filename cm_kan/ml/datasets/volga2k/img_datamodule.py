@@ -3,10 +3,10 @@ import random
 import torch
 import lightning as L
 from torchvision.transforms.v2 import (
-    Compose,
-    ToImage,
-    ToDtype,
     CenterCrop,
+    Compose,
+    ConvertImageDtype,
+    ToImageTensor,
 )
 from torch.utils.data import DataLoader
 from typing import Tuple
@@ -88,19 +88,19 @@ class Valga2kImgDataModule(L.LightningDataModule):
         )
 
         self.image_train_transform = Compose([
-            ToImage(),
+            ToImageTensor(),
             CenterCrop(1024),
-            ToDtype(dtype=torch.float32, scale=True),
+            ConvertImageDtype(dtype=torch.float32),
         ])
         self.image_val_transform = Compose([
-            ToImage(),
+            ToImageTensor(),
             CenterCrop(1024),
-            ToDtype(dtype=torch.float32, scale=True),
+            ConvertImageDtype(dtype=torch.float32),
         ])
         self.image_test_transform = Compose([
-            ToImage(),
+            ToImageTensor(),
             CenterCrop(1024),
-            ToDtype(dtype=torch.float32, scale=True),
+            ConvertImageDtype(dtype=torch.float32),
         ])
         self.num_workers = num_workers
 

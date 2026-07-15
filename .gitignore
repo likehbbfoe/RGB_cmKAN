@@ -177,6 +177,7 @@ experiments/
 !aim_supervised.example.yaml
 !samsung2iphone_unsupervised_pretrain.example.yaml
 !samsung2iphone_unsupervised.example.yaml
+!custom_unpaired.example.yaml
 
 debug.ipynb
 requirements-dev.txt

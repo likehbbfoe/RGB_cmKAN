@@ -30,6 +30,7 @@ class PipelineSelector:
                     weight_decay=config.pipeline.params.weight_decay,
                     pretrained=config.pipeline.params.pretrained,
                     pretrained_model=config.pipeline.params.pretrained_model,
+                    training_mode=config.pipeline.params.training_mode,
                     reverse_prediction=reverse_prediction,
                 )
             case PipelineType.pair_based:

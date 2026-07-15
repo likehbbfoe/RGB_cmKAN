@@ -31,7 +31,7 @@
 ```bash
 # 1. Создание изолированного программного окружения.
 # Рекомендуется использовать систему управления окружениями Conda.
-conda create -n cmKAN python=3.13 pip
+conda create -n cmKAN python=3.10 pip
 conda activate cmKAN
 # Также возможен альтернативный способ с использованием стандартного модуля venv.
 python -m venv .venv
