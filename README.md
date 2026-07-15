@@ -79,6 +79,9 @@ Run the provided training script:
 ./scripts/train_custom_unpaired.sh data/my_dataset
 ```
 
+A concise Chinese usage guide is available at
+[`docs/custom_unpaired_training_zh.md`](docs/custom_unpaired_training_zh.md).
+
 Domain directory names can be supplied when they are not `source` and `target`.
 For example, a Samsung-to-iPhone dataset can be launched with:
 
