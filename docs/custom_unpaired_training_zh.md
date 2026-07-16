@@ -429,6 +429,27 @@ results/my_experiment/
 `experiments/<experiment>/logs/metrics.csv` 中的训练记录。如果 checkpoint 不存在，
 程序会直接报错退出，不再悄悄使用未训练权重。
 
+### 不上传图片的亮度与色偏诊断
+
+数据不能离开服务器时，可以只统计聚合数值：
+
+```bash
+python scripts/diagnose_prediction_stats.py \
+  --data-root /home/share/y50063074/data \
+  --results-root results/custom_unpaired
+```
+
+脚本递归抽样 source、target 和两个推理结果目录，只输出：
+
+- 亮度均值、标准差和 1%/50%/99% 分位数
+- 黑色与白色像素比例
+- RGB 三通道均值
+- 输出域相对目标域的亮度差、对比度比例和颜色偏移
+
+它不会输出图片、文件名或单张图片统计。若输出中出现
+`output is substantially darker`、`contrast is compressed` 或
+`strong channel/color distribution shift`，即可分别定位整体变暗、灰雾化或肤色色偏。
+
 ## 🚀 整图推理
 
 ### 当前推理流程

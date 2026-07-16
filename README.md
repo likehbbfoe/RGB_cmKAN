@@ -105,6 +105,15 @@ The script passes `--reverse` as a flag (without a trailing `1`), writes test
 metrics separately from the training CSV, and saves both translation directions
 under `results/custom_unpaired/` by default.
 
+For privacy-safe debugging without sharing images or filenames, print aggregate
+brightness, contrast, clipping, and RGB statistics:
+
+```bash
+python scripts/diagnose_prediction_stats.py \
+  --data-root data/my_dataset \
+  --results-root results/custom_unpaired
+```
+
 The loader recursively discovers common image formats. Training uses resize,
 random crop, and horizontal/vertical flip augmentation. Color-changing
 augmentation is omitted because it would alter the source and target color
