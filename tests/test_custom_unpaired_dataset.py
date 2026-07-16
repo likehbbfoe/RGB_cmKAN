@@ -5,6 +5,7 @@ import numpy as np
 import torch
 
 from cm_kan.cli.train import _domain_path
+from cm_kan.cli.custom_unpaired import override_data_root
 from cm_kan.ml.datasets.custom_unpaired import CustomUnpairedDataModule
 from cm_kan.ml.datasets.custom_unpaired.img_dataset import _ensure_rgb
 
@@ -102,3 +103,29 @@ def test_data_root_layout_prefers_train_real_directory(tmp_path: Path) -> None:
         train_domain / "real"
     )
     assert _domain_path(str(tmp_path), "val", "samsung") == str(val_domain)
+
+
+def test_data_root_override_uses_explicit_val_and_optional_test(tmp_path: Path) -> None:
+    for split in ("train", "val"):
+        (tmp_path / split / "source").mkdir(parents=True)
+        (tmp_path / split / "target").mkdir(parents=True)
+
+    config = {
+        "data": {
+            "type": "custom_unpaired",
+            "train": {"source": "old/source", "target": "old/target"},
+            "test": {"source": "old/test/source", "target": "old/test/target"},
+        }
+    }
+
+    override_data_root(config, str(tmp_path), "source", "target")
+
+    assert config["data"]["train"] == {
+        "source": str(tmp_path / "train" / "source"),
+        "target": str(tmp_path / "train" / "target"),
+    }
+    assert config["data"]["val"] == {
+        "source": str(tmp_path / "val" / "source"),
+        "target": str(tmp_path / "val" / "target"),
+    }
+    assert "test" not in config["data"]

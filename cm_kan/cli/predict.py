@@ -107,7 +107,7 @@ def predict(args: argparse.Namespace) -> None:
 
     logger = CSVLogger(
         save_dir=os.path.join(config.save_dir, config.experiment),
-        name='logs',
+        name='predict_logs',
         version='',
     )
 

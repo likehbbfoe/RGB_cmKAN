@@ -370,6 +370,65 @@ resume: true
 experiments/<experiment>/logs/checkpoints/last.ckpt
 ```
 
+## ✅ 训练后一键测试
+
+仓库提供 `scripts/test_custom_unpaired.sh`，一次完成：
+
+1. 在 `test` 上计算 Cycle/Identity loss；没有 `test` 时自动复用 `val`
+2. 对 source 图片执行 source → target 整图推理
+3. 对 target 图片执行 target → source 整图推理
+
+对于标准的 `source`、`target` 目录，直接执行：
+
+```bash
+CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh \
+  /absolute/path/to/my_dataset
+```
+
+脚本参数顺序如下：
+
+```text
+test_custom_unpaired.sh \
+  DATA_ROOT \
+  SOURCE_DOMAIN \
+  TARGET_DOMAIN \
+  CONFIG_PATH \
+  WEIGHTS \
+  OUTPUT_ROOT
+```
+
+完整示例：
+
+```bash
+CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh \
+  /absolute/path/to/my_dataset \
+  source \
+  target \
+  configs/custom_unpaired.example.yaml \
+  logs/checkpoints/last.ckpt \
+  results/my_experiment
+```
+
+其中 `WEIGHTS` 相对于配置中的
+`<save_dir>/<experiment>/`，不要传 `--reverse 1`。脚本已经正确地使用了无参数的
+`--reverse` 开关。
+
+结果位置：
+
+```text
+experiments/<experiment>/test_logs/
+├── metrics.csv                 # test_cycle_loss、test_identity_loss、test_loss
+└── figures/test_*.png          # source、非配对 target、生成结果预览
+
+results/my_experiment/
+├── source_to_target/           # 正向整图结果
+└── target_to_source/           # 反向整图结果
+```
+
+测试和推理使用独立的 `test_logs`、`predict_logs`，不会覆盖
+`experiments/<experiment>/logs/metrics.csv` 中的训练记录。如果 checkpoint 不存在，
+程序会直接报错退出，不再悄悄使用未训练权重。
+
 ## 🚀 整图推理
 
 ### 当前推理流程

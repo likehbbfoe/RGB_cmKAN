@@ -19,6 +19,7 @@ from lightning.pytorch.callbacks import (
 from cm_kan.ml.callbacks import GenerateCallback
 from lightning.pytorch.loggers import CSVLogger
 from cm_kan import cli
+from .custom_unpaired import override_data_root
 
 
 def add_parser(subparser: argparse) -> None:
@@ -47,6 +48,24 @@ def add_parser(subparser: argparse) -> None:
         help="Reverse the direction of color transfer (for unpaired scenario only)",
         required=False,
     )
+    parser.add_argument(
+        "--data-root",
+        type=str,
+        help="Override custom dataset root containing train/, val/, and optional test/",
+        default=None,
+    )
+    parser.add_argument(
+        "--source-domain",
+        type=str,
+        help="Source-domain directory name below each split",
+        default="source",
+    )
+    parser.add_argument(
+        "--target-domain",
+        type=str,
+        help="Target-domain directory name below each split",
+        default="target",
+    )
 
     parser.set_defaults(func=test)
 
@@ -55,6 +74,14 @@ def test(args: argparse.Namespace) -> None:
     Logger.info(f"Loading config from '{args.config}'")
     with open(args.config, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
+
+    if args.data_root is not None:
+        override_data_root(
+            config,
+            args.data_root,
+            args.source_domain,
+            args.target_domain,
+        )
 
     config = Config(**config)
     inference_mode = config.pipeline.type != PipelineType.pair_based
@@ -69,7 +96,7 @@ def test(args: argparse.Namespace) -> None:
 
     logger = CSVLogger(
         save_dir=os.path.join(config.save_dir, config.experiment),
-        name='logs',
+        name='test_logs',
         version='',
     )
 
@@ -90,7 +117,7 @@ def test(args: argparse.Namespace) -> None:
     ckpt_path = os.path.join(config.save_dir, config.experiment, args.weights)
 
     if not os.path.exists(ckpt_path):
-        ckpt_path = None
+        raise ValueError(f"Checkpoint file '{ckpt_path}' does not exist.")
 
     trainer.test(
         model=pipeline, 

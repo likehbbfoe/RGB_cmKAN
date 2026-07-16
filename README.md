@@ -94,6 +94,17 @@ does not mix in a sibling `recolor/` directory. An existing validation split is
 used directly; only datasets without `val/` fall back to automatic splitting.
 If `test/` is absent, test-time evaluation reuses `val/`.
 
+After training, run loss evaluation and generate full-resolution predictions in
+both directions with one command:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh data/my_dataset
+```
+
+The script passes `--reverse` as a flag (without a trailing `1`), writes test
+metrics separately from the training CSV, and saves both translation directions
+under `results/custom_unpaired/` by default.
+
 The loader recursively discovers common image formats. Training uses resize,
 random crop, and horizontal/vertical flip augmentation. Color-changing
 augmentation is omitted because it would alter the source and target color

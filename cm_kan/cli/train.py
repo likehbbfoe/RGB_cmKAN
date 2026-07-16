@@ -19,19 +19,11 @@ from lightning.pytorch.callbacks import (
 from cm_kan.ml.callbacks import GenerateCallback
 from lightning.pytorch.loggers import CSVLogger
 from cm_kan import cli
+from .custom_unpaired import domain_path, override_data_root
 
 
-def _domain_path(data_root: str, split: str, domain: str) -> str:
-    split_root = os.path.join(data_root, split)
-    path = (
-        os.path.join(split_root, domain)
-        if os.path.isdir(split_root)
-        else os.path.join(data_root, domain)
-    )
-    real_path = os.path.join(path, "real")
-    if split == "train" and os.path.isdir(real_path):
-        return real_path
-    return path
+# Backwards compatibility for code that imported this private helper.
+_domain_path = domain_path
 
 
 def add_parser(subparser: argparse) -> None:
@@ -75,27 +67,12 @@ def train(args: argparse.Namespace) -> None:
         config = yaml.safe_load(f)
 
     if args.data_root is not None:
-        if config.get("data", {}).get("type") != DataType.custom_unpaired.value:
-            raise ValueError("--data-root can only be used with data.type=custom_unpaired")
-        config["data"]["train"] = {
-            "source": _domain_path(args.data_root, "train", args.source_domain),
-            "target": _domain_path(args.data_root, "train", args.target_domain),
-        }
-        if os.path.isdir(os.path.join(args.data_root, "val")):
-            config["data"]["val"] = {
-                "source": _domain_path(args.data_root, "val", args.source_domain),
-                "target": _domain_path(args.data_root, "val", args.target_domain),
-            }
-        else:
-            config["data"].pop("val", None)
-
-        if os.path.isdir(os.path.join(args.data_root, "test")):
-            config["data"]["test"] = {
-                "source": _domain_path(args.data_root, "test", args.source_domain),
-                "target": _domain_path(args.data_root, "test", args.target_domain),
-            }
-        else:
-            config["data"].pop("test", None)
+        override_data_root(
+            config,
+            args.data_root,
+            args.source_domain,
+            args.target_domain,
+        )
 
     config = Config(**config)
     if config.data.type == DataType.custom_unpaired:
