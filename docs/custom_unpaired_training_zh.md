@@ -381,9 +381,11 @@ experiments/<experiment>/logs/checkpoints/last.ckpt
 对于标准的 `source`、`target` 目录，直接执行：
 
 ```bash
-CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh \
-  /absolute/path/to/my_dataset
+CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh
 ```
+
+服务器默认数据目录已经设置为 `/home/share/y50063074/data`，默认结果目录是
+`results/custom_unpaired`，因此不需要输入路径参数。
 
 脚本参数顺序如下：
 
@@ -434,9 +436,17 @@ results/my_experiment/
 数据不能离开服务器时，可以只统计聚合数值：
 
 ```bash
-python scripts/diagnose_prediction_stats.py \
-  --data-root /home/share/y50063074/data \
-  --results-root results/custom_unpaired
+python scripts/diagnose_prediction_stats.py
+```
+
+诊断脚本使用与测试脚本相同的默认数据和结果目录。
+
+如需临时更换默认值，可使用环境变量而不修改脚本：
+
+```bash
+CMKAN_DATA_ROOT=/new/data/path \
+CMKAN_RESULTS_ROOT=/new/results/path \
+python scripts/diagnose_prediction_stats.py
 ```
 
 脚本递归抽样 source、target 和两个推理结果目录，只输出：

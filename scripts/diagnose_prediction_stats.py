@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import os
 from pathlib import Path
 from typing import Any
 
@@ -33,13 +34,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-root",
         type=Path,
-        required=True,
+        default=Path(
+            os.environ.get("CMKAN_DATA_ROOT", "/home/share/y50063074/data")
+        ),
         help="Dataset root containing val/ or test/ source and target directories",
     )
     parser.add_argument(
         "--results-root",
         type=Path,
-        default=Path("results/custom_unpaired"),
+        default=Path(
+            os.environ.get("CMKAN_RESULTS_ROOT", "results/custom_unpaired")
+        ),
         help="Prediction root containing source_to_target and target_to_source",
     )
     parser.add_argument(
@@ -48,8 +53,14 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Dataset split to inspect; auto prefers test and falls back to val",
     )
-    parser.add_argument("--source-domain", default="source")
-    parser.add_argument("--target-domain", default="target")
+    parser.add_argument(
+        "--source-domain",
+        default=os.environ.get("CMKAN_SOURCE_DOMAIN", "source"),
+    )
+    parser.add_argument(
+        "--target-domain",
+        default=os.environ.get("CMKAN_TARGET_DOMAIN", "target"),
+    )
     parser.add_argument(
         "--max-images",
         type=int,

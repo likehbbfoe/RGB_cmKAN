@@ -98,7 +98,7 @@ After training, run loss evaluation and generate full-resolution predictions in
 both directions with one command:
 
 ```bash
-CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh data/my_dataset
+CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh
 ```
 
 The script passes `--reverse` as a flag (without a trailing `1`), writes test
@@ -109,10 +109,12 @@ For privacy-safe debugging without sharing images or filenames, print aggregate
 brightness, contrast, clipping, and RGB statistics:
 
 ```bash
-python scripts/diagnose_prediction_stats.py \
-  --data-root data/my_dataset \
-  --results-root results/custom_unpaired
+python scripts/diagnose_prediction_stats.py
 ```
+
+The scripts default to `/home/share/y50063074/data` and
+`results/custom_unpaired`. Override them with `CMKAN_DATA_ROOT` and
+`CMKAN_RESULTS_ROOT` or the existing command-line arguments.
 
 The loader recursively discovers common image formats. Training uses resize,
 random crop, and horizontal/vertical flip augmentation. Color-changing
