@@ -32,6 +32,15 @@ class PipelineSelector:
                     pretrained_model=config.pipeline.params.pretrained_model,
                     training_mode=config.pipeline.params.training_mode,
                     reverse_prediction=reverse_prediction,
+                    adversarial_weight=config.pipeline.params.adversarial_weight,
+                    cycle_weight=config.pipeline.params.cycle_weight,
+                    identity_weight=config.pipeline.params.identity_weight,
+                    domain_statistics_weight=config.pipeline.params.domain_statistics_weight,
+                    exposure_weight=config.pipeline.params.exposure_weight,
+                    range_weight=config.pipeline.params.range_weight,
+                    warmup_epochs=config.pipeline.params.warmup_epochs,
+                    gradient_clip_val=config.pipeline.params.gradient_clip_val,
+                    discriminator_lr_scale=config.pipeline.params.discriminator_lr_scale,
                 )
             case PipelineType.pair_based:
                 return PairBasedPipeline(

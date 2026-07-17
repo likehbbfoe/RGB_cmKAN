@@ -26,8 +26,8 @@ data:
     source: data/custom_unpaired/val/source
     target: data/custom_unpaired/val/target
   params:
-    crop_size: 32
-    resize_size: 36
+    crop_size: 256
+    resize_size: 286
     horizontal_flip_probability: 0.5
     vertical_flip_probability: 0.0
     num_workers: 4
@@ -40,12 +40,21 @@ pipeline:
     optimizer: adam
     lr: 0.0002
     weight_decay: 0.0
-    batch_size: 2
-    val_batch_size: 2
-    test_batch_size: 2
+    batch_size: 1
+    val_batch_size: 1
+    test_batch_size: 1
     epochs: 200
     save_freq: 10
-    visualize_freq: 5
+    visualize_freq: 1
     training_mode: adversarial
     pretrained: false
     pretrained_model:
+    adversarial_weight: 1.0
+    cycle_weight: 10.0
+    identity_weight: 5.0
+    domain_statistics_weight: 1.0
+    exposure_weight: 5.0
+    range_weight: 1.0
+    warmup_epochs: 5
+    gradient_clip_val: 1.0
+    discriminator_lr_scale: 1.0

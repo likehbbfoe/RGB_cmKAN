@@ -26,13 +26,30 @@ class UnsupervisedPipeline(L.LightningModule):
         pretrained_model: str = None,
         training_mode: str = 'pretrain',
         reverse_prediction: bool = False,
+        adversarial_weight: float = 1.0,
+        cycle_weight: float = 10.0,
+        identity_weight: float = 5.0,
+        domain_statistics_weight: float = 0.0,
+        exposure_weight: float = 0.0,
+        range_weight: float = 0.0,
+        warmup_epochs: int = 0,
+        gradient_clip_val: float = 0.0,
+        discriminator_lr_scale: float = 1.0,
     ) -> None:
         super(UnsupervisedPipeline, self).__init__()
 
         self.model = model
         self.fake_pool_a = ImagePool()
         self.fake_pool_b = ImagePool()
-        self.lm = 10.0
+        self.adversarial_weight = adversarial_weight
+        self.cycle_weight = cycle_weight
+        self.identity_weight = identity_weight
+        self.domain_statistics_weight = domain_statistics_weight
+        self.exposure_weight = exposure_weight
+        self.range_weight = range_weight
+        self.warmup_epochs = warmup_epochs
+        self.gradient_clip_val = gradient_clip_val
+        self.discriminator_lr_scale = discriminator_lr_scale
         self.optimizer_type = optimiser
         self.lr = lr
         self.weight_decay = weight_decay
@@ -74,6 +91,65 @@ class UnsupervisedPipeline(L.LightningModule):
             target = torch.zeros_like(predictions)
         
         return F.mse_loss(predictions, target)
+
+    @staticmethod
+    def _domain_statistics_loss(predictions, targets):
+        """Match differentiable per-channel brightness and contrast moments."""
+        reduce_dims = (0, 2, 3)
+        prediction_mean = predictions.mean(dim=reduce_dims)
+        target_mean = targets.mean(dim=reduce_dims)
+        prediction_std = predictions.std(dim=reduce_dims, unbiased=False)
+        target_std = targets.std(dim=reduce_dims, unbiased=False)
+        return F.l1_loss(prediction_mean, target_mean) + F.l1_loss(
+            prediction_std, target_std
+        )
+
+    @staticmethod
+    def _range_loss(predictions):
+        """Penalize values that would be clipped when an image is saved."""
+        return F.relu(-predictions).mean() + F.relu(predictions - 1).mean()
+
+    @classmethod
+    def _exposure_loss(cls, predictions, inputs):
+        """Preserve per-image luminance mean and contrast across translation."""
+        prediction_luma = cls._luminance(predictions)
+        input_luma = cls._luminance(inputs)
+        reduce_dims = (1, 2)
+        prediction_mean = prediction_luma.mean(dim=reduce_dims)
+        input_mean = input_luma.mean(dim=reduce_dims)
+        prediction_std = prediction_luma.std(dim=reduce_dims, unbiased=False)
+        input_std = input_luma.std(dim=reduce_dims, unbiased=False)
+        return F.l1_loss(prediction_mean, input_mean) + F.l1_loss(
+            prediction_std, input_std
+        )
+
+    @staticmethod
+    def _luminance(images):
+        weights = images.new_tensor([0.2126, 0.7152, 0.0722]).view(1, 3, 1, 1)
+        return (images * weights).sum(dim=1)
+
+    @classmethod
+    def _luminance_mean(cls, images):
+        return cls._luminance(images).mean()
+
+    def _log_loss(self, name, value, batch_size, prog_bar=False):
+        self.log(
+            name,
+            value,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=prog_bar,
+            logger=True,
+            batch_size=batch_size,
+        )
+
+    def _clip_optimizer_gradients(self, optimizer):
+        if self.gradient_clip_val > 0:
+            self.clip_gradients(
+                optimizer,
+                gradient_clip_val=self.gradient_clip_val,
+                gradient_clip_algorithm="norm",
+            )
     
     @staticmethod
     def _set_requires_grad(nets, requires_grad = False):
@@ -159,7 +235,7 @@ class UnsupervisedPipeline(L.LightningModule):
 
                 optD = optim.Adam(
                     itertools.chain(self.model.dis_a.parameters(), self.model.dis_b.parameters()),
-                    lr=self.lr,
+                    lr=self.lr * self.discriminator_lr_scale,
                     betas=(0.5, 0.999),
                     weight_decay=self.weight_decay,
                 )
@@ -191,28 +267,94 @@ class UnsupervisedPipeline(L.LightningModule):
         
         # generator gen_ab must fool discrim dis_b so label is real = 1
         predFakeB = self.model.dis_b(fakeB)
-        mseGenB = self._disc_loss(predFakeB, 'real')
+        adversarialB = self._disc_loss(predFakeB, 'real')
         
         # generator gen_ba must fool discrim dis_a so label is real
         predFakeA = self.model.dis_a(fakeA)
-        mseGenA = self._disc_loss(predFakeA, 'real')
+        adversarialA = self._disc_loss(predFakeA, 'real')
         
         # compute extra losses
-        identityLoss = self._identity_loss(sameA, imgA) + self._identity_loss(sameB, imgB)
+        identityA = self._identity_loss(sameA, imgA)
+        identityB = self._identity_loss(sameB, imgB)
+        identityLoss = identityA + identityB
         
         # compute cycleLosses
-        cycleLoss = self._cycle_loss(cycledA, imgA) + self._cycle_loss(cycledB, imgB)
+        cycleA = self._cycle_loss(cycledA, imgA)
+        cycleB = self._cycle_loss(cycledB, imgB)
+        cycleLoss = cycleA + cycleB
+
+        statisticsA = self._domain_statistics_loss(fakeA, imgA)
+        statisticsB = self._domain_statistics_loss(fakeB, imgB)
+        statisticsLoss = statisticsA + statisticsB
+
+        exposureA = self._exposure_loss(fakeA, imgB)
+        exposureB = self._exposure_loss(fakeB, imgA)
+        exposureLoss = exposureA + exposureB
+
+        rangeA = self._range_loss(fakeA)
+        rangeB = self._range_loss(fakeB)
+        rangeLoss = rangeA + rangeB
         
         # gather all losses
-        extraLoss = cycleLoss + 0.5 * identityLoss
-        gen_loss = mseGenA + mseGenB + self.lm * extraLoss
-        self.log('gen_loss', gen_loss.item(), prog_bar=True, logger=True)
+        adversarialLoss = adversarialA + adversarialB
+        gen_loss = (
+            self.adversarial_weight * adversarialLoss
+            + self.cycle_weight * cycleLoss
+            + self.identity_weight * identityLoss
+            + self.domain_statistics_weight * statisticsLoss
+            + self.exposure_weight * exposureLoss
+            + self.range_weight * rangeLoss
+        )
+
+        batch_size = imgA.shape[0]
+        self._log_loss('gen_loss', gen_loss, batch_size, prog_bar=True)
+        self._log_loss('gen_adversarial_a_loss', adversarialA, batch_size)
+        self._log_loss('gen_adversarial_b_loss', adversarialB, batch_size)
+        self._log_loss('gen_cycle_a_loss', cycleA, batch_size)
+        self._log_loss('gen_cycle_b_loss', cycleB, batch_size)
+        self._log_loss('gen_identity_a_loss', identityA, batch_size)
+        self._log_loss('gen_identity_b_loss', identityB, batch_size)
+        self._log_loss('gen_statistics_a_loss', statisticsA, batch_size)
+        self._log_loss('gen_statistics_b_loss', statisticsB, batch_size)
+        self._log_loss('gen_exposure_a_loss', exposureA, batch_size)
+        self._log_loss('gen_exposure_b_loss', exposureB, batch_size)
+        self._log_loss('gen_range_a_loss', rangeA, batch_size)
+        self._log_loss('gen_range_b_loss', rangeB, batch_size)
+        self._log_loss(
+            'fake_a_luminance', self._luminance_mean(fakeA), batch_size
+        )
+        self._log_loss(
+            'fake_b_luminance', self._luminance_mean(fakeB), batch_size
+        )
+        self._log_loss(
+            'real_a_luminance', self._luminance_mean(imgA), batch_size
+        )
+        self._log_loss(
+            'real_b_luminance', self._luminance_mean(imgB), batch_size
+        )
         
         # store detached generated images
         self.fakeA = fakeA.detach()
         self.fakeB = fakeB.detach()
         
         return gen_loss
+
+    def generator_warmup_step(self, imgA, imgB):
+        """Initialize both generators near identity before adversarial updates."""
+        fakeB = self.model.gen_ab(imgA)
+        fakeA = self.model.gen_ba(imgB)
+        sameB = self.model.gen_ab(imgB)
+        sameA = self.model.gen_ba(imgA)
+        warmup_loss = (
+            self._cycle_loss(fakeB, imgA)
+            + self._cycle_loss(fakeA, imgB)
+            + self._cycle_loss(sameB, imgB)
+            + self._cycle_loss(sameA, imgA)
+        )
+        self._log_loss(
+            'warmup_loss', warmup_loss, imgA.shape[0], prog_bar=True
+        )
+        return warmup_loss
     
     def discriminator_training_step(self, imgA, imgB):
         """Update Discriminator"""        
@@ -234,8 +376,17 @@ class UnsupervisedPipeline(L.LightningModule):
         mseFakeB = self._disc_loss(predFakeB, 'fake')
         
         # gather all losses
-        dis_loss = 0.5 * (mseFakeA + mseRealA + mseFakeB + mseRealB)
-        self.log('dis_loss', dis_loss.item(), prog_bar=True, logger=True)
+        dis_a_loss = 0.5 * (mseFakeA + mseRealA)
+        dis_b_loss = 0.5 * (mseFakeB + mseRealB)
+        dis_loss = dis_a_loss + dis_b_loss
+        batch_size = imgA.shape[0]
+        self._log_loss('dis_loss', dis_loss, batch_size, prog_bar=True)
+        self._log_loss('dis_a_loss', dis_a_loss, batch_size)
+        self._log_loss('dis_b_loss', dis_b_loss, batch_size)
+        self._log_loss('dis_a_real_score', predRealA.mean(), batch_size)
+        self._log_loss('dis_a_fake_score', predFakeA.mean(), batch_size)
+        self._log_loss('dis_b_real_score', predRealB.mean(), batch_size)
+        self._log_loss('dis_b_fake_score', predFakeB.mean(), batch_size)
         return dis_loss
     
     def generator_pretaining_step(self, imgAB_recolor, imgA, imgBA_recolor, imgB):
@@ -261,8 +412,10 @@ class UnsupervisedPipeline(L.LightningModule):
 
     def _unpaired_evaluation_step(self, batch, stage: str):
         source, target = self._unpack_adversarial_batch(batch)
-        cycled_source = self.model.gen_ba(self.model.gen_ab(source))
-        cycled_target = self.model.gen_ab(self.model.gen_ba(target))
+        fake_target = self.model.gen_ab(source)
+        fake_source = self.model.gen_ba(target)
+        cycled_source = self.model.gen_ba(fake_target)
+        cycled_target = self.model.gen_ab(fake_source)
         same_source = self.model.gen_ba(source)
         same_target = self.model.gen_ab(target)
 
@@ -274,9 +427,60 @@ class UnsupervisedPipeline(L.LightningModule):
             self._identity_loss(same_source, source)
             + self._identity_loss(same_target, target)
         )
-        loss = cycle_loss + 0.5 * identity_loss
+        adversarial_loss = (
+            self._disc_loss(self.model.dis_a(fake_source), 'real')
+            + self._disc_loss(self.model.dis_b(fake_target), 'real')
+        )
+        statistics_loss = (
+            self._domain_statistics_loss(fake_source, source)
+            + self._domain_statistics_loss(fake_target, target)
+        )
+        exposure_loss = (
+            self._exposure_loss(fake_source, target)
+            + self._exposure_loss(fake_target, source)
+        )
+        range_loss = (
+            self._range_loss(fake_source)
+            + self._range_loss(fake_target)
+        )
+        loss = (
+            self.adversarial_weight * adversarial_loss
+            + self.cycle_weight * cycle_loss
+            + self.identity_weight * identity_loss
+            + self.domain_statistics_weight * statistics_loss
+            + self.exposure_weight * exposure_loss
+            + self.range_weight * range_loss
+        )
         self.log(f'{stage}_cycle_loss', cycle_loss, prog_bar=False, logger=True)
         self.log(f'{stage}_identity_loss', identity_loss, prog_bar=False, logger=True)
+        self.log(f'{stage}_adversarial_loss', adversarial_loss, prog_bar=False, logger=True)
+        self.log(f'{stage}_statistics_loss', statistics_loss, prog_bar=False, logger=True)
+        self.log(f'{stage}_exposure_loss', exposure_loss, prog_bar=False, logger=True)
+        self.log(f'{stage}_range_loss', range_loss, prog_bar=False, logger=True)
+        self.log(
+            f'{stage}_fake_source_luminance',
+            self._luminance_mean(fake_source),
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_fake_target_luminance',
+            self._luminance_mean(fake_target),
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_real_source_luminance',
+            self._luminance_mean(source),
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_real_target_luminance',
+            self._luminance_mean(target),
+            prog_bar=False,
+            logger=True,
+        )
         self.log(f'{stage}_loss', loss, prog_bar=True, logger=True)
         return {'loss': loss}
 
@@ -290,22 +494,40 @@ class UnsupervisedPipeline(L.LightningModule):
             img_a, img_b = self._unpack_adversarial_batch(batch)
             opt_gen, opt_disc = self.optimizers()
             sch_gen, sch_disc = self.lr_schedulers()
+
+            if self.current_epoch < self.warmup_epochs:
+                self.toggle_optimizer(opt_gen)
+                self._set_requires_grad(
+                    [self.model.dis_a, self.model.dis_b], requires_grad=False
+                )
+                opt_gen.zero_grad()
+                warmup_loss = self.generator_warmup_step(img_a, img_b)
+                self.manual_backward(warmup_loss)
+                self._clip_optimizer_gradients(opt_gen)
+                opt_gen.step()
+                self.untoggle_optimizer(opt_gen)
+                if self.trainer.is_last_batch:
+                    sch_gen.step()
+                    sch_disc.step()
+                return
             
             # train generator
             self.toggle_optimizer(opt_gen)
             self._set_requires_grad([self.model.dis_a, self.model.dis_b], requires_grad=False)
-            gen_loss = self.generator_training_step(img_a, img_b)
             opt_gen.zero_grad()
+            gen_loss = self.generator_training_step(img_a, img_b)
             self.manual_backward(gen_loss)
+            self._clip_optimizer_gradients(opt_gen)
             opt_gen.step()
             self.untoggle_optimizer(opt_gen)
             
             # train discriminator
             self.toggle_optimizer(opt_disc)
             self._set_requires_grad([self.model.dis_a, self.model.dis_b], requires_grad=True)
-            disc_loss = self.discriminator_training_step(img_a, img_b)
             opt_disc.zero_grad()
+            disc_loss = self.discriminator_training_step(img_a, img_b)
             self.manual_backward(disc_loss)
+            self._clip_optimizer_gradients(opt_disc)
             opt_disc.step()
             self.untoggle_optimizer(opt_disc)
 

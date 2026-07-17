@@ -119,8 +119,10 @@ The scripts default to `/home/share/y50063074/data` and
 The loader recursively discovers common image formats. Training uses resize,
 random crop, and horizontal/vertical flip augmentation. Color-changing
 augmentation is omitted because it would alter the source and target color
-distributions. Adjust image size, split ratios, batch size, and training length in
-`configs/custom_unpaired.example.yaml`.
+distributions. The custom configuration uses a short identity warm-up, gradient
+clipping, output-range regularization, and differentiable color/exposure moments
+to reduce asymmetric dark-output collapse. Adjust image size, split ratios,
+batch size, and training length in `configs/custom_unpaired.example.yaml`.
 
 
 

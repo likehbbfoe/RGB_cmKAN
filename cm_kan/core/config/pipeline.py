@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Union
 
 
@@ -37,6 +37,15 @@ class UnsupervisedPipelineParams(DefaultPipelineParams):
     pretrained: bool
     pretrained_model: Optional[str]
     training_mode: UnsupervisedTrainingMode = UnsupervisedTrainingMode.pretrain
+    adversarial_weight: float = Field(default=1.0, ge=0)
+    cycle_weight: float = Field(default=10.0, ge=0)
+    identity_weight: float = Field(default=5.0, ge=0)
+    domain_statistics_weight: float = Field(default=0.0, ge=0)
+    exposure_weight: float = Field(default=0.0, ge=0)
+    range_weight: float = Field(default=0.0, ge=0)
+    warmup_epochs: int = Field(default=0, ge=0)
+    gradient_clip_val: float = Field(default=0.0, ge=0)
+    discriminator_lr_scale: float = Field(default=1.0, gt=0)
 
 
 class Pipeline(BaseModel):

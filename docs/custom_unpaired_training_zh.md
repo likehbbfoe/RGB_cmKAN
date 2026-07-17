@@ -211,10 +211,21 @@ cycle(x̂, x) = L1(x̂, x) + 0.15 × (1 - SSIM(x̂, x))
 ```text
 L_cycle    = cycle(cycle_A, A) + cycle(cycle_B, B)
 L_identity = L1(identity_A, A) + L1(identity_B, B)
+L_stats    = RGB mean/std(fake_A, A) + RGB mean/std(fake_B, B)
+L_exposure = luminance mean/std(fake_A, B) + luminance mean/std(fake_B, A)
+L_range    = values below 0 or above 1
 
-L_G = adversarial_A + adversarial_B
-      + 10 × (L_cycle + 0.5 × L_identity)
+L_G = 1 × L_adversarial
+      + 10 × L_cycle
+      + 5 × L_identity
+      + 1 × L_stats
+      + 5 × L_exposure
+      + 1 × L_range
 ```
+
+`L_exposure` 使用同一张输入图约束转换前后的亮度均值和对比度，专门防止
+target → source 出现整体乘以约 0.42 的压暗退化；`L_stats` 使用目标域 batch 的
+RGB 均值和标准差约束域颜色；`L_range` 防止生成器依赖保存时的截断。
 
 对抗项使用 MSE：生成器希望判别器把 `fake_A`、`fake_B` 判断为真。判别器分别
 比较真实图与 ImagePool 中的历史伪图：
@@ -232,7 +243,12 @@ L_D = 0.5 × (fake_A + real_A + fake_B + real_B)
 指标为：
 
 ```text
-val_loss = val_cycle_loss + 0.5 × val_identity_loss
+val_loss = 1 × val_adversarial_loss
+           + 10 × val_cycle_loss
+           + 5 × val_identity_loss
+           + 1 × val_statistics_loss
+           + 5 × val_exposure_loss
+           + 1 × val_range_loss
 ```
 
 checkpoint 监控 `val_loss`。这个指标衡量循环一致性和域内 identity 保真，不等同
@@ -328,10 +344,15 @@ python main.py train \
 | `visualize_freq` | 结果预览间隔 |
 | `training_mode` | 自定义非配对训练应为 `adversarial` |
 | `pretrained` | 从头训练时设为 `false` |
+| `domain_statistics_weight` | 目标域 RGB 均值/标准差约束权重 |
+| `exposure_weight` | 同图转换前后亮度和对比度保持权重 |
+| `range_weight` | 超出 `[0, 1]` 的输出范围惩罚 |
+| `warmup_epochs` | 判别器启动前的生成器 identity warm-up 轮数 |
+| `gradient_clip_val` | 生成器和判别器梯度裁剪阈值 |
+| `discriminator_lr_scale` | 判别器相对生成器的学习率比例 |
 
-当前示例是 `crop_size: 32`、`resize_size: 36`，适用于小 patch。如果训练图片
-是大图，建议从 `crop_size: 256`、`resize_size: 286` 开始；显存允许时可用
-`512/544` 获取更大上下文。
+当前示例已改为 `crop_size: 256`、`resize_size: 286`、`batch_size: 1`，避免
+32×32 patch 无法提供全局曝光上下文。显存允许时可用 `512/544` 获取更大上下文。
 
 ## 📊 日志与断点续训
 
@@ -350,8 +371,17 @@ experiments/custom_unpaired/
 - `step`、`epoch`
 - `gen_loss`
 - `dis_loss`
+- `gen_adversarial_a_loss`、`gen_adversarial_b_loss`
+- `gen_cycle_a_loss`、`gen_cycle_b_loss`
+- `gen_identity_a_loss`、`gen_identity_b_loss`
+- `gen_statistics_a_loss`、`gen_statistics_b_loss`
+- `gen_exposure_a_loss`、`gen_exposure_b_loss`
+- `fake_a_luminance`、`fake_b_luminance`
+- `real_a_luminance`、`real_b_luminance`
+- `dis_a_loss`、`dis_b_loss` 以及各方向真假分数
 - `val_cycle_loss`
 - `val_identity_loss`
+- `val_adversarial_loss`、`val_statistics_loss`、`val_exposure_loss`、`val_range_loss`
 - `val_loss`
 - 学习率
 
