@@ -1,0 +1,60 @@
+experiment: custom_unpaired_stable_v2
+save_dir: experiments
+resume: false
+accelerator: gpu
+
+model:
+  type: cycle_cm_kan
+  params:
+    in_dims:
+      - 3
+    out_dims:
+      - 3
+    grid_size: 5
+    spline_order: 3
+    residual_std: 0.1
+    grid_range:
+      - 0.0
+      - 1.0
+
+data:
+  type: custom_unpaired
+  train:
+    source: /home/share/y50063074/data/train/source
+    target: /home/share/y50063074/data/train/target
+  val:
+    source: /home/share/y50063074/data/val/source
+    target: /home/share/y50063074/data/val/target
+  params:
+    crop_size: 256
+    resize_size: 286
+    horizontal_flip_probability: 0.5
+    vertical_flip_probability: 0.0
+    num_workers: 4
+    recursive: true
+    seed: 42
+
+pipeline:
+  type: unsupervised
+  params:
+    optimizer: adam
+    lr: 0.0002
+    weight_decay: 0.0
+    batch_size: 1
+    val_batch_size: 1
+    test_batch_size: 1
+    epochs: 200
+    save_freq: 10
+    visualize_freq: 1
+    training_mode: adversarial
+    pretrained: false
+    pretrained_model: null
+    adversarial_weight: 1.0
+    cycle_weight: 10.0
+    identity_weight: 5.0
+    domain_statistics_weight: 1.0
+    exposure_weight: 5.0
+    range_weight: 1.0
+    warmup_epochs: 5
+    gradient_clip_val: 1.0
+    discriminator_lr_scale: 1.0
