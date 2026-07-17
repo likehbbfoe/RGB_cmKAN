@@ -31,6 +31,8 @@ class UnsupervisedPipeline(L.LightningModule):
         identity_weight: float = 5.0,
         domain_statistics_weight: float = 0.0,
         exposure_weight: float = 0.0,
+        chroma_weight: float = 0.0,
+        reflectance_weight: float = 0.0,
         range_weight: float = 0.0,
         warmup_epochs: int = 0,
         gradient_clip_val: float = 0.0,
@@ -46,6 +48,8 @@ class UnsupervisedPipeline(L.LightningModule):
         self.identity_weight = identity_weight
         self.domain_statistics_weight = domain_statistics_weight
         self.exposure_weight = exposure_weight
+        self.chroma_weight = chroma_weight
+        self.reflectance_weight = reflectance_weight
         self.range_weight = range_weight
         self.warmup_epochs = warmup_epochs
         self.gradient_clip_val = gradient_clip_val
@@ -122,6 +126,50 @@ class UnsupervisedPipeline(L.LightningModule):
         return F.l1_loss(prediction_mean, input_mean) + F.l1_loss(
             prediction_std, input_std
         )
+
+    @staticmethod
+    def _chromaticity(images, eps=1e-4):
+        """Return intensity-invariant RGB ratios for skin/color preservation."""
+        non_negative_images = images.clamp_min(0)
+        intensity = non_negative_images.sum(dim=1, keepdim=True).clamp_min(eps)
+        return non_negative_images / intensity
+
+    @classmethod
+    def _chroma_loss(cls, predictions, inputs):
+        """Preserve hue while allowing a multiplicative illumination change."""
+        return F.l1_loss(
+            cls._chromaticity(predictions),
+            cls._chromaticity(inputs),
+        )
+
+    @classmethod
+    def _reflectance(cls, images, kernel_size=31, eps=1e-4):
+        """Estimate log-domain detail after removing smooth illumination."""
+        if kernel_size < 3 or kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be an odd integer >= 3")
+        if min(images.shape[-2:]) <= kernel_size // 2:
+            raise ValueError(
+                "image height and width must be larger than half the reflectance "
+                f"kernel size; got {images.shape[-2:]} and {kernel_size=}"
+            )
+
+        log_luminance = cls._luminance(images).clamp_min(eps).log().unsqueeze(1)
+        padding = kernel_size // 2
+        smooth_log_luminance = F.avg_pool2d(
+            F.pad(
+                log_luminance,
+                (padding, padding, padding, padding),
+                mode='reflect',
+            ),
+            kernel_size=kernel_size,
+            stride=1,
+        )
+        return log_luminance - smooth_log_luminance
+
+    @classmethod
+    def _reflectance_loss(cls, predictions, inputs):
+        """Keep local intrinsic contrast while permitting smooth relighting."""
+        return F.l1_loss(cls._reflectance(predictions), cls._reflectance(inputs))
 
     @staticmethod
     def _luminance(images):
@@ -291,6 +339,22 @@ class UnsupervisedPipeline(L.LightningModule):
         exposureB = self._exposure_loss(fakeB, imgA)
         exposureLoss = exposureA + exposureB
 
+        if self.chroma_weight > 0:
+            chromaA = self._chroma_loss(fakeA, imgB)
+            chromaB = self._chroma_loss(fakeB, imgA)
+        else:
+            chromaA = fakeA.new_zeros(())
+            chromaB = fakeB.new_zeros(())
+        chromaLoss = chromaA + chromaB
+
+        if self.reflectance_weight > 0:
+            reflectanceA = self._reflectance_loss(fakeA, imgB)
+            reflectanceB = self._reflectance_loss(fakeB, imgA)
+        else:
+            reflectanceA = fakeA.new_zeros(())
+            reflectanceB = fakeB.new_zeros(())
+        reflectanceLoss = reflectanceA + reflectanceB
+
         rangeA = self._range_loss(fakeA)
         rangeB = self._range_loss(fakeB)
         rangeLoss = rangeA + rangeB
@@ -303,6 +367,8 @@ class UnsupervisedPipeline(L.LightningModule):
             + self.identity_weight * identityLoss
             + self.domain_statistics_weight * statisticsLoss
             + self.exposure_weight * exposureLoss
+            + self.chroma_weight * chromaLoss
+            + self.reflectance_weight * reflectanceLoss
             + self.range_weight * rangeLoss
         )
 
@@ -318,6 +384,10 @@ class UnsupervisedPipeline(L.LightningModule):
         self._log_loss('gen_statistics_b_loss', statisticsB, batch_size)
         self._log_loss('gen_exposure_a_loss', exposureA, batch_size)
         self._log_loss('gen_exposure_b_loss', exposureB, batch_size)
+        self._log_loss('gen_chroma_a_loss', chromaA, batch_size)
+        self._log_loss('gen_chroma_b_loss', chromaB, batch_size)
+        self._log_loss('gen_reflectance_a_loss', reflectanceA, batch_size)
+        self._log_loss('gen_reflectance_b_loss', reflectanceB, batch_size)
         self._log_loss('gen_range_a_loss', rangeA, batch_size)
         self._log_loss('gen_range_b_loss', rangeB, batch_size)
         self._log_loss(
@@ -439,6 +509,20 @@ class UnsupervisedPipeline(L.LightningModule):
             self._exposure_loss(fake_source, target)
             + self._exposure_loss(fake_target, source)
         )
+        if self.chroma_weight > 0:
+            chroma_loss = (
+                self._chroma_loss(fake_source, target)
+                + self._chroma_loss(fake_target, source)
+            )
+        else:
+            chroma_loss = fake_source.new_zeros(())
+        if self.reflectance_weight > 0:
+            reflectance_loss = (
+                self._reflectance_loss(fake_source, target)
+                + self._reflectance_loss(fake_target, source)
+            )
+        else:
+            reflectance_loss = fake_source.new_zeros(())
         range_loss = (
             self._range_loss(fake_source)
             + self._range_loss(fake_target)
@@ -449,6 +533,8 @@ class UnsupervisedPipeline(L.LightningModule):
             + self.identity_weight * identity_loss
             + self.domain_statistics_weight * statistics_loss
             + self.exposure_weight * exposure_loss
+            + self.chroma_weight * chroma_loss
+            + self.reflectance_weight * reflectance_loss
             + self.range_weight * range_loss
         )
         self.log(f'{stage}_cycle_loss', cycle_loss, prog_bar=False, logger=True)
@@ -456,6 +542,13 @@ class UnsupervisedPipeline(L.LightningModule):
         self.log(f'{stage}_adversarial_loss', adversarial_loss, prog_bar=False, logger=True)
         self.log(f'{stage}_statistics_loss', statistics_loss, prog_bar=False, logger=True)
         self.log(f'{stage}_exposure_loss', exposure_loss, prog_bar=False, logger=True)
+        self.log(f'{stage}_chroma_loss', chroma_loss, prog_bar=False, logger=True)
+        self.log(
+            f'{stage}_reflectance_loss',
+            reflectance_loss,
+            prog_bar=False,
+            logger=True,
+        )
         self.log(f'{stage}_range_loss', range_loss, prog_bar=False, logger=True)
         self.log(
             f'{stage}_fake_source_luminance',

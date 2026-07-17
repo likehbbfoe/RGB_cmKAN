@@ -120,9 +120,11 @@ The loader recursively discovers common image formats. Training uses resize,
 random crop, and horizontal/vertical flip augmentation. Color-changing
 augmentation is omitted because it would alter the source and target color
 distributions. The custom configuration uses a short identity warm-up, gradient
-clipping, output-range regularization, and differentiable color/exposure moments
-to reduce asymmetric dark-output collapse. Adjust image size, split ratios,
-batch size, and training length in `configs/custom_unpaired.example.yaml`.
+clipping, output-range regularization, differentiable color/exposure moments,
+intensity-invariant chromaticity consistency, and log-domain reflectance
+consistency. The last two terms keep subject color and local intrinsic contrast
+while still permitting smooth illumination changes. Adjust image size, split
+ratios, batch size, and training length in `configs/custom_unpaired.example.yaml`.
 
 
 

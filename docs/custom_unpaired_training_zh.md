@@ -213,19 +213,26 @@ L_cycle    = cycle(cycle_A, A) + cycle(cycle_B, B)
 L_identity = L1(identity_A, A) + L1(identity_B, B)
 L_stats    = RGB mean/std(fake_A, A) + RGB mean/std(fake_B, B)
 L_exposure = luminance mean/std(fake_A, B) + luminance mean/std(fake_B, A)
+L_chroma   = chromaticity(fake_A, B) + chromaticity(fake_B, A)
+L_reflect  = Retinex reflectance(fake_A, B) + Retinex reflectance(fake_B, A)
 L_range    = values below 0 or above 1
 
 L_G = 1 × L_adversarial
       + 10 × L_cycle
       + 5 × L_identity
       + 1 × L_stats
-      + 5 × L_exposure
+      + 2 × L_exposure
+      + 2 × L_chroma
+      + 1 × L_reflect
       + 1 × L_range
 ```
 
 `L_exposure` 使用同一张输入图约束转换前后的亮度均值和对比度，专门防止
 target → source 出现整体乘以约 0.42 的压暗退化；`L_stats` 使用目标域 batch 的
-RGB 均值和标准差约束域颜色；`L_range` 防止生成器依赖保存时的截断。
+RGB 均值和标准差约束域颜色；`L_chroma` 比较同一人物转换前后的归一化 RGB
+色度，允许整体亮度变化但抑制肤色偏色；`L_reflect` 在 log luminance 中移除
+低频平滑光照后比较局部反射细节，避免模型把非配对 target 人物较暗的固有
+肤色误学成域风格。`L_range` 防止生成器依赖保存时的截断。
 
 对抗项使用 MSE：生成器希望判别器把 `fake_A`、`fake_B` 判断为真。判别器分别
 比较真实图与 ImagePool 中的历史伪图：
@@ -247,7 +254,9 @@ val_loss = 1 × val_adversarial_loss
            + 10 × val_cycle_loss
            + 5 × val_identity_loss
            + 1 × val_statistics_loss
-           + 5 × val_exposure_loss
+           + 2 × val_exposure_loss
+           + 2 × val_chroma_loss
+           + 1 × val_reflectance_loss
            + 1 × val_range_loss
 ```
 
@@ -346,12 +355,14 @@ python main.py train \
 | `pretrained` | 从头训练时设为 `false` |
 | `domain_statistics_weight` | 目标域 RGB 均值/标准差约束权重 |
 | `exposure_weight` | 同图转换前后亮度和对比度保持权重 |
+| `chroma_weight` | 同图转换前后的强度无关色度保持权重，抑制肤色偏移 |
+| `reflectance_weight` | 去除平滑光照后的局部反射一致性权重 |
 | `range_weight` | 超出 `[0, 1]` 的输出范围惩罚 |
 | `warmup_epochs` | 判别器启动前的生成器 identity warm-up 轮数 |
 | `gradient_clip_val` | 生成器和判别器梯度裁剪阈值 |
 | `discriminator_lr_scale` | 判别器相对生成器的学习率比例 |
 
-当前示例已改为 `crop_size: 256`、`resize_size: 286`、`batch_size: 1`，避免
+当前示例已改为 `crop_size: 256`、`resize_size: 286`、`batch_size: 2`，避免
 32×32 patch 无法提供全局曝光上下文。显存允许时可用 `512/544` 获取更大上下文。
 
 ## 📊 日志与断点续训
@@ -376,12 +387,15 @@ experiments/custom_unpaired/
 - `gen_identity_a_loss`、`gen_identity_b_loss`
 - `gen_statistics_a_loss`、`gen_statistics_b_loss`
 - `gen_exposure_a_loss`、`gen_exposure_b_loss`
+- `gen_chroma_a_loss`、`gen_chroma_b_loss`
+- `gen_reflectance_a_loss`、`gen_reflectance_b_loss`
 - `fake_a_luminance`、`fake_b_luminance`
 - `real_a_luminance`、`real_b_luminance`
 - `dis_a_loss`、`dis_b_loss` 以及各方向真假分数
 - `val_cycle_loss`
 - `val_identity_loss`
-- `val_adversarial_loss`、`val_statistics_loss`、`val_exposure_loss`、`val_range_loss`
+- `val_adversarial_loss`、`val_statistics_loss`、`val_exposure_loss`
+- `val_chroma_loss`、`val_reflectance_loss`、`val_range_loss`
 - `val_loss`
 - 学习率
 
@@ -450,7 +464,8 @@ CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh \
 ```text
 experiments/<experiment>/test_logs/
 ├── metrics.csv                 # test_cycle_loss、test_identity_loss、test_loss
-└── figures/test_*.png          # source、非配对 target、生成结果预览
+└── figures/test_translation_cycle_*.png
+                                # 正向和反向各一行，每行三张相关图
 
 results/my_experiment/
 ├── source_to_target/           # 正向整图结果
@@ -460,6 +475,15 @@ results/my_experiment/
 测试和推理使用独立的 `test_logs`、`predict_logs`，不会覆盖
 `experiments/<experiment>/logs/metrics.csv` 中的训练记录。如果 checkpoint 不存在，
 程序会直接报错退出，不再悄悄使用未训练权重。
+
+训练和测试的非配对预览不再把随机 source/target 并排伪装成配对真值。图片中：
+
+```text
+第 1 行：source → fake_target → cycled_source
+第 2 行：target → fake_source → cycled_target
+```
+
+若验证 batch 大于 1，会先依次显示所有正向三联图，再显示所有反向三联图。
 
 ### 不上传图片的亮度与色偏诊断
 

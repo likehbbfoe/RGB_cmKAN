@@ -42,6 +42,8 @@ class UnsupervisedPipelineParams(DefaultPipelineParams):
     identity_weight: float = Field(default=5.0, ge=0)
     domain_statistics_weight: float = Field(default=0.0, ge=0)
     exposure_weight: float = Field(default=0.0, ge=0)
+    chroma_weight: float = Field(default=0.0, ge=0)
+    reflectance_weight: float = Field(default=0.0, ge=0)
     range_weight: float = Field(default=0.0, ge=0)
     warmup_epochs: int = Field(default=0, ge=0)
     gradient_clip_val: float = Field(default=0.0, ge=0)

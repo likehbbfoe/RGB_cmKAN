@@ -37,6 +37,8 @@ class PipelineSelector:
                     identity_weight=config.pipeline.params.identity_weight,
                     domain_statistics_weight=config.pipeline.params.domain_statistics_weight,
                     exposure_weight=config.pipeline.params.exposure_weight,
+                    chroma_weight=config.pipeline.params.chroma_weight,
+                    reflectance_weight=config.pipeline.params.reflectance_weight,
                     range_weight=config.pipeline.params.range_weight,
                     warmup_epochs=config.pipeline.params.warmup_epochs,
                     gradient_clip_val=config.pipeline.params.gradient_clip_val,

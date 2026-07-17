@@ -1,4 +1,4 @@
-experiment: custom_unpaired
+experiment: custom_unpaired_skin_stable_v3
 save_dir: experiments
 resume: false
 accelerator: auto
@@ -40,7 +40,7 @@ pipeline:
     optimizer: adam
     lr: 0.0002
     weight_decay: 0.0
-    batch_size: 1
+    batch_size: 2
     val_batch_size: 1
     test_batch_size: 1
     epochs: 200
@@ -53,7 +53,9 @@ pipeline:
     cycle_weight: 10.0
     identity_weight: 5.0
     domain_statistics_weight: 1.0
-    exposure_weight: 5.0
+    exposure_weight: 2.0
+    chroma_weight: 2.0
+    reflectance_weight: 1.0
     range_weight: 1.0
     warmup_epochs: 5
     gradient_clip_val: 1.0
