@@ -12,13 +12,15 @@ import torchvision
 
 
 class GenerateCallback(Callback):
-    def __init__(self, every_n_epochs=1) -> None:
+    def __init__(self, every_n_epochs=1, max_preview_candidates=64) -> None:
         super().__init__()
         self.every_n_epochs = every_n_epochs
+        self.max_preview_candidates = max_preview_candidates
         self.input_imgs = None
         self.save_dir = None
         self.target_imgs = None
         self.is_unpaired = False
+        self.preview_pair_distance = None
 
     @staticmethod
     def _unpack_batch(batch):
@@ -33,6 +35,57 @@ class GenerateCallback(Callback):
         )
         self.input_imgs = self.input_imgs.to(pl_module.device)
         self.target_imgs = self.target_imgs.to(pl_module.device)
+
+    @classmethod
+    def _chromaticity_centroid(cls, image: torch.Tensor) -> torch.Tensor | None:
+        """Return the mean visible-pixel CIE xy coordinate for sample selection."""
+        xy = cls._rgb_to_xy(image)
+        if xy.shape[0] == 0:
+            return None
+        return xy.mean(dim=0)
+
+    def _capture_most_distinct_batch(
+        self,
+        dataloader,
+        pl_module: LightningModule,
+    ) -> None:
+        """Keep the unpaired validation pair with the largest xy centroid gap."""
+        best_source = None
+        best_target = None
+        best_distance = -1.0
+        candidate_count = 0
+
+        for batch in dataloader:
+            sources, targets, is_unpaired = self._unpack_batch(batch)
+            if not is_unpaired:
+                self._capture_batch(batch, pl_module)
+                return
+
+            for source, target in zip(sources, targets):
+                source_centroid = self._chromaticity_centroid(source)
+                target_centroid = self._chromaticity_centroid(target)
+                if source_centroid is not None and target_centroid is not None:
+                    distance = torch.linalg.vector_norm(
+                        source_centroid - target_centroid
+                    ).item()
+                    if distance > best_distance:
+                        best_distance = distance
+                        best_source = source.detach().cpu().clone()
+                        best_target = target.detach().cpu().clone()
+
+                candidate_count += 1
+                if candidate_count >= self.max_preview_candidates:
+                    break
+            if candidate_count >= self.max_preview_candidates:
+                break
+
+        if best_source is None or best_target is None:
+            raise ValueError("No valid source/target pair found for preview")
+
+        self.input_imgs = best_source.unsqueeze(0).to(pl_module.device)
+        self.target_imgs = best_target.unsqueeze(0).to(pl_module.device)
+        self.is_unpaired = True
+        self.preview_pair_distance = best_distance
 
     def _make_preview(
         self,
@@ -129,8 +182,37 @@ class GenerateCallback(Callback):
         )
         xyz = linear_rgb @ rgb_to_xyz.T
         xyz_sum = xyz.sum(dim=1)
-        valid = xyz_sum > 1e-6
+        valid = (xyz_sum > 1e-6) & (xyz[:, 1] > 1e-4)
         return xyz[valid, :2] / xyz_sum[valid, None]
+
+    @staticmethod
+    def _adaptive_xy_limits(
+        xy: torch.Tensor,
+        minimum_span: float = 0.03,
+        margin_ratio: float = 0.18,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Zoom to the central point cloud without changing CIE xy geometry."""
+        lower = torch.quantile(xy, 0.02, dim=0)
+        upper = torch.quantile(xy, 0.98, dim=0)
+        center = (lower + upper) / 2
+        span = max((upper - lower).max().item(), minimum_span)
+        half_span = span * (0.5 + margin_ratio)
+
+        def bounded_limits(value: float, lower_bound: float, upper_bound: float):
+            low = value - half_span
+            high = value + half_span
+            if low < lower_bound:
+                high += lower_bound - low
+                low = lower_bound
+            if high > upper_bound:
+                low -= high - upper_bound
+                high = upper_bound
+            return max(lower_bound, low), min(upper_bound, high)
+
+        return (
+            bounded_limits(center[0].item(), 0.0, 0.8),
+            bounded_limits(center[1].item(), 0.0, 0.9),
+        )
 
     @classmethod
     def _scatter_tile(
@@ -152,6 +234,7 @@ class GenerateCallback(Callback):
             ("Target", target, "#264653", 2, 0.20),
             ("Translated", translated, "#E76F51", 3, 0.42),
         )
+        prepared_series = []
         for label, image, color, zorder, alpha in series:
             xy = cls._rgb_to_xy(image)
             if xy.shape[0] == 0:
@@ -163,6 +246,15 @@ class GenerateCallback(Callback):
                 steps=point_count,
             ).long()
             sampled_xy = xy[point_indices]
+            prepared_series.append(
+                (label, color, zorder, alpha, xy, sampled_xy)
+            )
+
+        if not prepared_series:
+            raise ValueError("No valid chromaticity points found for preview")
+
+        centroids = {}
+        for label, color, zorder, alpha, xy, sampled_xy in prepared_series:
             axis.scatter(
                 sampled_xy[:, 0].numpy(),
                 sampled_xy[:, 1].numpy(),
@@ -175,6 +267,7 @@ class GenerateCallback(Callback):
                 zorder=zorder,
             )
             centroid = xy.mean(dim=0)
+            centroids[label] = centroid
             axis.scatter(
                 centroid[0].item(),
                 centroid[1].item(),
@@ -185,12 +278,29 @@ class GenerateCallback(Callback):
                 zorder=zorder + 1,
             )
 
-        axis.set_xlim(0, 0.8)
-        axis.set_ylim(0, 0.9)
+        combined_xy = torch.cat(
+            [item[-1] for item in prepared_series],
+            dim=0,
+        )
+        x_limits, y_limits = cls._adaptive_xy_limits(combined_xy)
+        axis.set_xlim(*x_limits)
+        axis.set_ylim(*y_limits)
         axis.set_aspect("equal", adjustable="box")
         axis.set_xlabel("CIE x", fontsize=10)
         axis.set_ylabel("CIE y", fontsize=10)
-        axis.set_title("CIE 1931 xy chromaticity", fontsize=11, fontweight="bold")
+        title = "CIE 1931 xy chromaticity"
+        if {"Source", "Target", "Translated"}.issubset(centroids):
+            source_target_distance = torch.linalg.vector_norm(
+                centroids["Source"] - centroids["Target"]
+            ).item()
+            translated_target_distance = torch.linalg.vector_norm(
+                centroids["Translated"] - centroids["Target"]
+            ).item()
+            title += (
+                f"\ncentroid distance: S-T {source_target_distance:.4f}, "
+                f"F-T {translated_target_distance:.4f}"
+            )
+        axis.set_title(title, fontsize=10, fontweight="bold")
         axis.tick_params(labelsize=9)
         axis.grid(alpha=0.18, linewidth=0.7)
         axis.spines["top"].set_visible(False)
@@ -231,7 +341,7 @@ class GenerateCallback(Callback):
 
     def on_train_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         dataloader = trainer.val_dataloaders
-        self._capture_batch(next(iter(dataloader)), pl_module)
+        self._capture_most_distinct_batch(dataloader, pl_module)
         self.save_dir = os.path.join(trainer.log_dir, "figures")
 
     def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
@@ -240,7 +350,7 @@ class GenerateCallback(Callback):
 
     def on_test_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         dataloader = trainer.test_dataloaders
-        self._capture_batch(next(iter(dataloader)), pl_module)
+        self._capture_most_distinct_batch(dataloader, pl_module)
         self.save_dir = os.path.join(trainer.log_dir, "figures")
 
     def on_test_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:

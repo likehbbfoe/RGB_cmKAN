@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import torch
 
 from cm_kan.ml.callbacks.generate import GenerateCallback
@@ -21,6 +23,43 @@ def test_black_pixels_are_excluded_from_cie_xy() -> None:
     black = torch.zeros(3, 2, 2)
 
     assert GenerateCallback._rgb_to_xy(black).shape == (0, 2)
+
+
+def test_adaptive_xy_limits_zoom_without_log_transform() -> None:
+    xy = torch.tensor(
+        [
+            [0.30, 0.31],
+            [0.32, 0.33],
+            [0.34, 0.35],
+            [0.36, 0.37],
+        ]
+    )
+
+    x_limits, y_limits = GenerateCallback._adaptive_xy_limits(xy)
+
+    assert x_limits[1] - x_limits[0] < 0.2
+    assert y_limits[1] - y_limits[0] < 0.2
+    assert x_limits[0] < xy[:, 0].median() < x_limits[1]
+    assert y_limits[0] < xy[:, 1].median() < y_limits[1]
+
+
+def test_preview_selects_largest_chromaticity_gap() -> None:
+    red = torch.tensor([1.0, 0.0, 0.0]).view(1, 3, 1, 1).expand(1, 3, 4, 4)
+    green = torch.tensor([0.0, 1.0, 0.0]).view(1, 3, 1, 1).expand(1, 3, 4, 4)
+    callback = GenerateCallback(max_preview_candidates=2)
+    dataloader = [
+        {"source": red, "target": red},
+        {"source": red, "target": green},
+    ]
+
+    callback._capture_most_distinct_batch(
+        dataloader,
+        SimpleNamespace(device=torch.device("cpu")),
+    )
+
+    assert torch.equal(callback.input_imgs, red)
+    assert torch.equal(callback.target_imgs, green)
+    assert callback.preview_pair_distance > 0.3
 
 
 def test_scatter_tile_matches_preview_image_shape() -> None:
