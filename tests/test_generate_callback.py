@@ -46,7 +46,7 @@ def test_adaptive_xy_limits_zoom_without_log_transform() -> None:
 def test_preview_selects_largest_chromaticity_gap() -> None:
     red = torch.tensor([1.0, 0.0, 0.0]).view(1, 3, 1, 1).expand(1, 3, 4, 4)
     green = torch.tensor([0.0, 1.0, 0.0]).view(1, 3, 1, 1).expand(1, 3, 4, 4)
-    callback = GenerateCallback(max_preview_candidates=2)
+    callback = GenerateCallback(max_preview_candidates=2, preview_samples=1)
     dataloader = [
         {"source": red, "target": red},
         {"source": red, "target": green},
@@ -59,7 +59,7 @@ def test_preview_selects_largest_chromaticity_gap() -> None:
 
     assert torch.equal(callback.input_imgs, red)
     assert torch.equal(callback.target_imgs, green)
-    assert callback.preview_pair_distance > 0.3
+    assert callback.preview_pair_distances[0] > 0.3
 
 
 def test_scatter_tile_matches_preview_image_shape() -> None:

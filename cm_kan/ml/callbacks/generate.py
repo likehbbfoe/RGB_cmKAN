@@ -12,15 +12,21 @@ import torchvision
 
 
 class GenerateCallback(Callback):
-    def __init__(self, every_n_epochs=1, max_preview_candidates=64) -> None:
+    def __init__(
+        self,
+        every_n_epochs=1,
+        max_preview_candidates=64,
+        preview_samples=6,
+    ) -> None:
         super().__init__()
         self.every_n_epochs = every_n_epochs
         self.max_preview_candidates = max_preview_candidates
+        self.preview_samples = preview_samples
         self.input_imgs = None
         self.save_dir = None
         self.target_imgs = None
         self.is_unpaired = False
-        self.preview_pair_distance = None
+        self.preview_pair_distances = []
 
     @staticmethod
     def _unpack_batch(batch):
@@ -49,10 +55,8 @@ class GenerateCallback(Callback):
         dataloader,
         pl_module: LightningModule,
     ) -> None:
-        """Keep the unpaired validation pair with the largest xy centroid gap."""
-        best_source = None
-        best_target = None
-        best_distance = -1.0
+        """Keep unpaired validation pairs with the largest xy centroid gaps."""
+        candidates = []
         candidate_count = 0
 
         for batch in dataloader:
@@ -68,10 +72,13 @@ class GenerateCallback(Callback):
                     distance = torch.linalg.vector_norm(
                         source_centroid - target_centroid
                     ).item()
-                    if distance > best_distance:
-                        best_distance = distance
-                        best_source = source.detach().cpu().clone()
-                        best_target = target.detach().cpu().clone()
+                    candidates.append(
+                        (
+                            distance,
+                            source.detach().cpu().clone(),
+                            target.detach().cpu().clone(),
+                        )
+                    )
 
                 candidate_count += 1
                 if candidate_count >= self.max_preview_candidates:
@@ -79,24 +86,33 @@ class GenerateCallback(Callback):
             if candidate_count >= self.max_preview_candidates:
                 break
 
-        if best_source is None or best_target is None:
+        if not candidates:
             raise ValueError("No valid source/target pair found for preview")
 
-        self.input_imgs = best_source.unsqueeze(0).to(pl_module.device)
-        self.target_imgs = best_target.unsqueeze(0).to(pl_module.device)
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        selected = candidates[:self.preview_samples]
+        self.input_imgs = torch.stack(
+            [item[1] for item in selected]
+        ).to(pl_module.device)
+        self.target_imgs = torch.stack(
+            [item[2] for item in selected]
+        ).to(pl_module.device)
         self.is_unpaired = True
-        self.preview_pair_distance = best_distance
+        self.preview_pair_distances = [item[0] for item in selected]
 
     def _make_preview(
         self,
         pl_module: LightningModule,
     ) -> tuple[torch.Tensor, str]:
-        predictions = pl_module(self.input_imgs)
-        images = self._four_column_preview(
-            self.input_imgs,
-            predictions,
-            self.target_imgs,
-        )
+        preview_rows = []
+        for index in range(self.input_imgs.shape[0]):
+            source = self.input_imgs[index : index + 1]
+            target = self.target_imgs[index : index + 1]
+            prediction = pl_module(source)
+            preview_rows.append(
+                self._four_column_preview(source, prediction, target)
+            )
+        images = torch.cat(preview_rows, dim=0)
         preview_name = "source_to_target" if self.is_unpaired else "reconst"
         return images, preview_name
 
