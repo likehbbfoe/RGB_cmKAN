@@ -97,6 +97,7 @@ class CustomUnpairedDataModule(L.LightningDataModule):
         vertical_flip_probability: float = 0.0,
         num_workers: int = 4,
         recursive: bool = True,
+        pair_by_subdirectory: bool = False,
         seed: int = 42,
         image_extensions: Tuple[str, ...] = DEFAULT_IMAGE_EXTENSIONS,
     ) -> None:
@@ -108,6 +109,8 @@ class CustomUnpairedDataModule(L.LightningDataModule):
         if val_fraction + test_fraction >= 1:
             raise ValueError("val_fraction + test_fraction must be less than 1")
 
+        source_root = Path(source_dir).expanduser()
+        target_root = Path(target_dir).expanduser()
         source_paths = _find_images(source_dir, image_extensions, recursive)
         target_paths = _find_images(target_dir, image_extensions, recursive)
 
@@ -126,6 +129,8 @@ class CustomUnpairedDataModule(L.LightningDataModule):
             )
 
         if has_val_source:
+            val_source_root = Path(val_source_dir).expanduser()
+            val_target_root = Path(val_target_dir).expanduser()
             self.train_source_paths = source_paths
             self.train_target_paths = target_paths
             self.val_source_paths = _find_images(
@@ -136,6 +141,8 @@ class CustomUnpairedDataModule(L.LightningDataModule):
             )
 
             if has_test_source:
+                test_source_root = Path(test_source_dir).expanduser()
+                test_target_root = Path(test_target_dir).expanduser()
                 self.test_source_paths = _find_images(
                     test_source_dir, image_extensions, recursive
                 )
@@ -147,9 +154,15 @@ class CustomUnpairedDataModule(L.LightningDataModule):
                 # test command usable without leaking validation into train.
                 self.test_source_paths = self.val_source_paths.copy()
                 self.test_target_paths = self.val_target_paths.copy()
+                test_source_root = val_source_root
+                test_target_root = val_target_root
         elif has_test_source:
             raise ValueError("Explicit test directories require explicit val directories")
         else:
+            val_source_root = source_root
+            val_target_root = target_root
+            test_source_root = source_root
+            test_target_root = target_root
             (
                 self.train_source_paths,
                 self.val_source_paths,
@@ -166,6 +179,13 @@ class CustomUnpairedDataModule(L.LightningDataModule):
         self.test_batch_size = test_batch_size
         self.num_workers = num_workers
         self.seed = seed
+        self.pair_by_subdirectory = pair_by_subdirectory
+        self.train_source_root = source_root
+        self.train_target_root = target_root
+        self.val_source_root = val_source_root
+        self.val_target_root = val_target_root
+        self.test_source_root = test_source_root
+        self.test_target_root = test_target_root
 
         # Color jitter is intentionally omitted: the task is to learn the
         # source/target color distributions, so color-changing augmentation
@@ -196,12 +216,18 @@ class CustomUnpairedDataModule(L.LightningDataModule):
                 self.train_target_paths,
                 transform=self.train_transform,
                 random_pairing=True,
+                pair_by_subdirectory=self.pair_by_subdirectory,
+                source_root=self.train_source_root,
+                target_root=self.train_target_root,
             )
             self.val_dataset = UnpairedImageDataset(
                 self.val_source_paths,
                 self.val_target_paths,
                 transform=self.eval_transform,
                 random_pairing=False,
+                pair_by_subdirectory=self.pair_by_subdirectory,
+                source_root=self.val_source_root,
+                target_root=self.val_target_root,
             )
         if stage in ("test", None):
             self.test_dataset = UnpairedImageDataset(
@@ -209,6 +235,9 @@ class CustomUnpairedDataModule(L.LightningDataModule):
                 self.test_target_paths,
                 transform=self.eval_transform,
                 random_pairing=False,
+                pair_by_subdirectory=self.pair_by_subdirectory,
+                source_root=self.test_source_root,
+                target_root=self.test_target_root,
             )
 
     def _loader(

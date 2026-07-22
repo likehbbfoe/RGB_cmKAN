@@ -50,12 +50,10 @@ class CmKANLayer(torch.nn.Module):
 
         return x.squeeze(0)
 
-    def forward(self, x):
-
+    def _apply_spatial_kan(self, x, weights):
+        """Apply predicted per-pixel KAN parameters to an input image."""
         B, C, H, W = x.shape
-        
-        # kan weights (b, kan_params_num, h, w)
-        weights = self.generator(x)
+
         # kan weights (b, h * w, kan_params_num)
         weights = weights.permute(0, 2, 3, 1)
         weights = weights.reshape(B * H * W, self.kan_params_num)
@@ -68,6 +66,19 @@ class CmKANLayer(torch.nn.Module):
         x = x.view(B, H, W, self.kan_layer.out_dim).permute(0, 3, 1, 2)
 
         return x
+
+    def encode(self, x):
+        """Expose the contextual features that produce spatial KAN weights."""
+        return self.generator.encode(x)
+
+    def forward_with_features(self, x):
+        """Return the translated image and its input contextual features."""
+        weights, features = self.generator.forward_with_features(x)
+        return self._apply_spatial_kan(x, weights), features
+
+    def forward(self, x):
+        output, _ = self.forward_with_features(x)
+        return output
     
 
 class LightCmKANLayer(CmKANLayer):
@@ -76,4 +87,3 @@ class LightCmKANLayer(CmKANLayer):
         super(LightCmKANLayer, self).__init__(in_channels, out_channels, grid_size, spline_order,
                  residual_std, grid_range)
         self.generator = LightGeneratorLayer(in_channels, self.kan_params_num)
-

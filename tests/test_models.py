@@ -28,7 +28,11 @@ def test_cm_kan_forward():
     shape = (1, 3, 32, 32)
     x = torch.rand(shape)
     y = model(x)
+    y_with_features, features = model.forward_with_features(x)
     assert y.shape == shape
+    assert torch.allclose(y, y_with_features)
+    assert len(features) == 1
+    assert features[0].shape == (1, 63, 32, 32)
 
 
 def test_light_cm_kan_create():
@@ -57,4 +61,8 @@ def test_light_cm_kan_forward():
     shape = (1, 3, 32, 32)
     x = torch.rand(shape)
     y = model(x)
+    y_with_features, features = model.forward_with_features(x)
     assert y.shape == shape
+    assert torch.allclose(y, y_with_features)
+    assert len(features) == 1
+    assert features[0].shape == (1, 15, 32, 32)

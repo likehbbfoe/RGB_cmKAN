@@ -27,6 +27,7 @@ class CustomUnpairedDataParams(BaseModel):
     vertical_flip_probability: float = Field(default=0.0, ge=0, le=1)
     num_workers: int = Field(default=4, ge=0)
     recursive: bool = True
+    pair_by_subdirectory: bool = False
     seed: int = 42
     image_extensions: Tuple[str, ...] = (
         ".png",

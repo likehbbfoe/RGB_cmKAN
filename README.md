@@ -123,8 +123,12 @@ distributions. The custom configuration uses a short identity warm-up, gradient
 clipping, output-range regularization, differentiable color/exposure moments,
 intensity-invariant chromaticity consistency, and log-domain reflectance
 consistency. The last two terms keep subject color and local intrinsic contrast
-while still permitting smooth illumination changes. Adjust image size, split
-ratios, batch size, and training length in `configs/custom_unpaired.example.yaml`.
+while still permitting smooth illumination changes. Optional scene-grouped
+sampling draws unpaired source/target images only from matching relative
+subdirectories, and PatchNCE compares cmKAN contextual patches between each input
+and its own translation to preserve content without assuming pixel-aligned pairs.
+Adjust image size, split ratios, batch size, and training length in
+`configs/custom_unpaired.example.yaml`.
 
 
 

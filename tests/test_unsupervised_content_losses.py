@@ -40,3 +40,21 @@ def test_reflectance_loss_detects_local_tone_change() -> None:
     loss = UnsupervisedPipeline._reflectance_loss(changed, image)
 
     assert loss.item() > 0.05
+
+
+def test_patch_nce_prefers_matching_spatial_features() -> None:
+    key = torch.eye(4).reshape(1, 4, 2, 2)
+    matching_query = key.clone().requires_grad_(True)
+    shifted_query = torch.roll(key, shifts=1, dims=-1)
+
+    matching_loss = UnsupervisedPipeline._patch_nce_loss(
+        [matching_query], [key], num_patches=4, temperature=0.07
+    )
+    shifted_loss = UnsupervisedPipeline._patch_nce_loss(
+        [shifted_query], [key], num_patches=4, temperature=0.07
+    )
+
+    assert matching_loss.item() < shifted_loss.item()
+    matching_loss.backward()
+    assert matching_query.grad is not None
+    assert torch.isfinite(matching_query.grad).all()

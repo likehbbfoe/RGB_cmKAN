@@ -31,6 +31,23 @@ class CmKAN(torch.nn.Module):
             x = layer(x)
         return x
 
+    def forward_with_features(self, x):
+        """Translate an image and return contextual features from every layer."""
+        features = []
+        for layer in self.layers:
+            x, layer_features = layer.forward_with_features(x)
+            features.append(layer_features)
+        return x, features
+
+    def encode_features(self, x):
+        """Encode content without computing the final unused layer output."""
+        features = []
+        for index, layer in enumerate(self.layers):
+            features.append(layer.encode(x))
+            if index + 1 < len(self.layers):
+                x = layer(x)
+        return features
+
 
 class LightCmKAN(torch.nn.Module):
     """ Input features BxCxN """
@@ -58,3 +75,20 @@ class LightCmKAN(torch.nn.Module):
         for layer in self.layers:
             x = layer(x)
         return x
+
+    def forward_with_features(self, x):
+        """Translate an image and return contextual features from every layer."""
+        features = []
+        for layer in self.layers:
+            x, layer_features = layer.forward_with_features(x)
+            features.append(layer_features)
+        return x, features
+
+    def encode_features(self, x):
+        """Encode content without computing the final unused layer output."""
+        features = []
+        for index, layer in enumerate(self.layers):
+            features.append(layer.encode(x))
+            if index + 1 < len(self.layers):
+                x = layer(x)
+        return features

@@ -33,6 +33,9 @@ class UnsupervisedPipeline(L.LightningModule):
         exposure_weight: float = 0.0,
         chroma_weight: float = 0.0,
         reflectance_weight: float = 0.0,
+        patch_nce_weight: float = 0.0,
+        patch_nce_num_patches: int = 256,
+        patch_nce_temperature: float = 0.07,
         range_weight: float = 0.0,
         warmup_epochs: int = 0,
         gradient_clip_val: float = 0.0,
@@ -50,6 +53,9 @@ class UnsupervisedPipeline(L.LightningModule):
         self.exposure_weight = exposure_weight
         self.chroma_weight = chroma_weight
         self.reflectance_weight = reflectance_weight
+        self.patch_nce_weight = patch_nce_weight
+        self.patch_nce_num_patches = patch_nce_num_patches
+        self.patch_nce_temperature = patch_nce_temperature
         self.range_weight = range_weight
         self.warmup_epochs = warmup_epochs
         self.gradient_clip_val = gradient_clip_val
@@ -170,6 +176,63 @@ class UnsupervisedPipeline(L.LightningModule):
     def _reflectance_loss(cls, predictions, inputs):
         """Keep local intrinsic contrast while permitting smooth relighting."""
         return F.l1_loss(cls._reflectance(predictions), cls._reflectance(inputs))
+
+    @staticmethod
+    def _patch_nce_loss(
+        query_features,
+        key_features,
+        num_patches,
+        temperature,
+        random_sampling=True,
+    ):
+        """Contrast matching spatial patches against negatives in each image."""
+        if len(query_features) != len(key_features):
+            raise ValueError("query_features and key_features must have equal length")
+        if not query_features:
+            raise ValueError("PatchNCE requires at least one feature map")
+
+        layer_losses = []
+        for query, key in zip(query_features, key_features):
+            if query.shape != key.shape:
+                raise ValueError(
+                    "PatchNCE feature shapes must match; "
+                    f"got {query.shape} and {key.shape}"
+                )
+
+            batch_size, channels, height, width = query.shape
+            available_patches = height * width
+            sampled_patches = min(num_patches, available_patches)
+            if random_sampling:
+                patch_ids = torch.randperm(
+                    available_patches, device=query.device
+                )[:sampled_patches]
+            else:
+                patch_ids = torch.linspace(
+                    0,
+                    available_patches - 1,
+                    steps=sampled_patches,
+                    device=query.device,
+                ).long()
+
+            query_patches = query.flatten(2).transpose(1, 2)[:, patch_ids]
+            key_patches = key.detach().flatten(2).transpose(1, 2)[:, patch_ids]
+            query_patches = F.normalize(query_patches, dim=-1)
+            key_patches = F.normalize(key_patches, dim=-1)
+
+            logits = torch.bmm(
+                query_patches, key_patches.transpose(1, 2)
+            ) / temperature
+            labels = torch.arange(
+                sampled_patches, device=query.device
+            ).expand(batch_size, sampled_patches)
+            layer_losses.append(
+                F.cross_entropy(
+                    logits.reshape(-1, sampled_patches),
+                    labels.reshape(-1),
+                )
+            )
+
+        return torch.stack(layer_losses).mean()
 
     @staticmethod
     def _luminance(images):
@@ -304,10 +367,31 @@ class UnsupervisedPipeline(L.LightningModule):
     
     def generator_training_step(self, imgA, imgB):        
         """cycle images - using only generator nets"""
-        fakeB = self.model.gen_ab(imgA)
+        if self.patch_nce_weight > 0:
+            fakeB, source_features = self.model.gen_ab.forward_with_features(imgA)
+            fakeA, target_features = self.model.gen_ba.forward_with_features(imgB)
+            fakeB_features = self.model.gen_ab.encode_features(fakeB)
+            fakeA_features = self.model.gen_ba.encode_features(fakeA)
+            patchNceB = self._patch_nce_loss(
+                fakeB_features,
+                source_features,
+                self.patch_nce_num_patches,
+                self.patch_nce_temperature,
+            )
+            patchNceA = self._patch_nce_loss(
+                fakeA_features,
+                target_features,
+                self.patch_nce_num_patches,
+                self.patch_nce_temperature,
+            )
+        else:
+            fakeB = self.model.gen_ab(imgA)
+            fakeA = self.model.gen_ba(imgB)
+            patchNceA = fakeA.new_zeros(())
+            patchNceB = fakeB.new_zeros(())
+        patchNceLoss = patchNceA + patchNceB
+
         cycledA = self.model.gen_ba(fakeB)
-        
-        fakeA = self.model.gen_ba(imgB)
         cycledB = self.model.gen_ab(fakeA)
         
         sameB = self.model.gen_ab(imgB)
@@ -369,6 +453,7 @@ class UnsupervisedPipeline(L.LightningModule):
             + self.exposure_weight * exposureLoss
             + self.chroma_weight * chromaLoss
             + self.reflectance_weight * reflectanceLoss
+            + self.patch_nce_weight * patchNceLoss
             + self.range_weight * rangeLoss
         )
 
@@ -388,6 +473,8 @@ class UnsupervisedPipeline(L.LightningModule):
         self._log_loss('gen_chroma_b_loss', chromaB, batch_size)
         self._log_loss('gen_reflectance_a_loss', reflectanceA, batch_size)
         self._log_loss('gen_reflectance_b_loss', reflectanceB, batch_size)
+        self._log_loss('gen_patch_nce_a_loss', patchNceA, batch_size)
+        self._log_loss('gen_patch_nce_b_loss', patchNceB, batch_size)
         self._log_loss('gen_range_a_loss', rangeA, batch_size)
         self._log_loss('gen_range_b_loss', rangeB, batch_size)
         self._log_loss(
@@ -482,8 +569,33 @@ class UnsupervisedPipeline(L.LightningModule):
 
     def _unpaired_evaluation_step(self, batch, stage: str):
         source, target = self._unpack_adversarial_batch(batch)
-        fake_target = self.model.gen_ab(source)
-        fake_source = self.model.gen_ba(target)
+        if self.patch_nce_weight > 0:
+            fake_target, source_features = self.model.gen_ab.forward_with_features(
+                source
+            )
+            fake_source, target_features = self.model.gen_ba.forward_with_features(
+                target
+            )
+            patch_nce_loss = (
+                self._patch_nce_loss(
+                    self.model.gen_ab.encode_features(fake_target),
+                    source_features,
+                    self.patch_nce_num_patches,
+                    self.patch_nce_temperature,
+                    random_sampling=False,
+                )
+                + self._patch_nce_loss(
+                    self.model.gen_ba.encode_features(fake_source),
+                    target_features,
+                    self.patch_nce_num_patches,
+                    self.patch_nce_temperature,
+                    random_sampling=False,
+                )
+            )
+        else:
+            fake_target = self.model.gen_ab(source)
+            fake_source = self.model.gen_ba(target)
+            patch_nce_loss = fake_target.new_zeros(())
         cycled_source = self.model.gen_ba(fake_target)
         cycled_target = self.model.gen_ab(fake_source)
         same_source = self.model.gen_ba(source)
@@ -535,6 +647,7 @@ class UnsupervisedPipeline(L.LightningModule):
             + self.exposure_weight * exposure_loss
             + self.chroma_weight * chroma_loss
             + self.reflectance_weight * reflectance_loss
+            + self.patch_nce_weight * patch_nce_loss
             + self.range_weight * range_loss
         )
         self.log(f'{stage}_cycle_loss', cycle_loss, prog_bar=False, logger=True)
@@ -546,6 +659,12 @@ class UnsupervisedPipeline(L.LightningModule):
         self.log(
             f'{stage}_reflectance_loss',
             reflectance_loss,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_patch_nce_loss',
+            patch_nce_loss,
             prog_bar=False,
             logger=True,
         )

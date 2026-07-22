@@ -1,4 +1,4 @@
-experiment: custom_unpaired_skin_stable_v3
+experiment: custom_unpaired_weak_nce_v4
 save_dir: experiments
 resume: false
 accelerator: auto
@@ -32,6 +32,7 @@ data:
     vertical_flip_probability: 0.0
     num_workers: 4
     recursive: true
+    pair_by_subdirectory: true
     seed: 42
 
 pipeline:
@@ -56,6 +57,9 @@ pipeline:
     exposure_weight: 2.0
     chroma_weight: 2.0
     reflectance_weight: 1.0
+    patch_nce_weight: 1.0
+    patch_nce_num_patches: 256
+    patch_nce_temperature: 0.07
     range_weight: 1.0
     warmup_epochs: 5
     gradient_clip_val: 1.0

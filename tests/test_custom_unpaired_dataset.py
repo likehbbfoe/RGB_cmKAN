@@ -2,12 +2,16 @@ from pathlib import Path
 
 import imageio.v3 as imageio
 import numpy as np
+import pytest
 import torch
 
 from cm_kan.cli.train import _domain_path
 from cm_kan.cli.custom_unpaired import override_data_root
 from cm_kan.ml.datasets.custom_unpaired import CustomUnpairedDataModule
-from cm_kan.ml.datasets.custom_unpaired.img_dataset import _ensure_rgb
+from cm_kan.ml.datasets.custom_unpaired.img_dataset import (
+    UnpairedImageDataset,
+    _ensure_rgb,
+)
 
 
 def _write_images(directory: Path, count: int, offset: int) -> None:
@@ -129,3 +133,53 @@ def test_data_root_override_uses_explicit_val_and_optional_test(tmp_path: Path) 
         "target": str(tmp_path / "val" / "target"),
     }
     assert "test" not in config["data"]
+
+
+def test_grouped_sampling_never_crosses_scene_subdirectories(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    _write_images(source_root / "indoor", count=2, offset=10)
+    _write_images(source_root / "outdoor", count=2, offset=30)
+    _write_images(target_root / "indoor", count=3, offset=100)
+    _write_images(target_root / "outdoor", count=3, offset=200)
+
+    dataset = UnpairedImageDataset(
+        source_paths=sorted(source_root.rglob("*.png")),
+        target_paths=sorted(target_root.rglob("*.png")),
+        transform=lambda image: torch.from_numpy(image.copy()),
+        random_pairing=True,
+        pair_by_subdirectory=True,
+        source_root=source_root,
+        target_root=target_root,
+    )
+
+    for index in range(len(dataset.source_paths)):
+        source_group = dataset.source_groups[index]
+        for _ in range(10):
+            target_mean = dataset[index]["target"].float().mean().item()
+            if source_group == "indoor":
+                assert 100 <= target_mean <= 120
+            else:
+                assert 200 <= target_mean <= 220
+
+
+def test_grouped_sampling_rejects_mismatched_scene_directories(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    _write_images(source_root / "indoor", count=1, offset=10)
+    _write_images(target_root / "outdoor", count=1, offset=200)
+
+    with pytest.raises(ValueError, match="matching relative subdirectories"):
+        UnpairedImageDataset(
+            source_paths=sorted(source_root.rglob("*.png")),
+            target_paths=sorted(target_root.rglob("*.png")),
+            transform=lambda image: torch.from_numpy(image.copy()),
+            random_pairing=True,
+            pair_by_subdirectory=True,
+            source_root=source_root,
+            target_root=target_root,
+        )

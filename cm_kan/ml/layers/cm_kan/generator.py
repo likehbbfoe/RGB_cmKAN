@@ -226,6 +226,7 @@ class GeneratorLayer(torch.nn.Module):
         super().__init__()
 
         MID_CHANNELS = 21 * in_channels
+        self.feature_channels = MID_CHANNELS
         self.encoder = Encoder2D(in_channels, MID_CHANNELS, 3)
 
         self.norm1 = LayerNorm(MID_CHANNELS)
@@ -241,17 +242,21 @@ class GeneratorLayer(torch.nn.Module):
 
         self.conv_reproj = FFN(in_features=MID_CHANNELS, out_features=out_channels)
 
-    def forward(self, x:torch.Tensor):
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the contextual feature map used to predict spatial KAN weights."""
+        return self.norm1(self.encoder(x))
 
-        B, C, H, W = x.shape
+    def forward_with_features(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        _, _, H, W = x.shape
 
-        # forward projection
-        x = self.encoder(x)
-
-        x = self.norm1(x)
+        # Forward projection. These contextual features are also exposed for
+        # PatchNCE so translation can preserve corresponding input content.
+        features = self.encode(x)
 
         # basis coeff
-        q = self.q(x)
+        q = self.q(features)
         k = self.k(self.basis)
         v = self.v(self.basis)
 
@@ -268,10 +273,14 @@ class GeneratorLayer(torch.nn.Module):
         y = rearrange(y, 'b c (h w) -> b c h w', h=H, w=W)
 
         # back projection
-        x = self.norm2(y)
-        x = self.conv_reproj(x)
+        output = self.norm2(y)
+        output = self.conv_reproj(output)
 
-        return x
+        return output, features
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        output, _ = self.forward_with_features(x)
+        return output
 
 
 class LightEncoder2D(torch.nn.Module):
@@ -321,6 +330,7 @@ class LightGeneratorLayer(torch.nn.Module):
         super().__init__()
 
         MID_CHANNELS = 3+12
+        self.feature_channels = MID_CHANNELS
         self.encoder = LightEncoder2D(in_channels, MID_CHANNELS, 3)
 
         self.norm1 = LayerNorm(MID_CHANNELS)
@@ -336,17 +346,20 @@ class LightGeneratorLayer(torch.nn.Module):
 
         self.conv_reproj = FFN(in_features=MID_CHANNELS, out_features=out_channels)
 
-    def forward(self, x:torch.Tensor):
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the contextual feature map used to predict spatial KAN weights."""
+        return self.norm1(self.encoder(x))
 
-        B, C, H, W = x.shape
+    def forward_with_features(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        _, _, H, W = x.shape
 
-        # forward projection
-        x = self.encoder(x)
-
-        x = self.norm1(x)
+        # Forward projection
+        features = self.encode(x)
 
         # basis coeff
-        q = self.q(x)
+        q = self.q(features)
         k = self.k(self.basis)
         v = self.v(self.basis)
 
@@ -363,7 +376,11 @@ class LightGeneratorLayer(torch.nn.Module):
         y = rearrange(y, 'b c (h w) -> b c h w', h=H, w=W)
 
         # back projection
-        x = self.norm2(y)
-        x = self.conv_reproj(x)
+        output = self.norm2(y)
+        output = self.conv_reproj(output)
 
-        return x
+        return output, features
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        output, _ = self.forward_with_features(x)
+        return output
