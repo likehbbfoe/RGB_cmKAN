@@ -644,6 +644,21 @@ source/target 仍来自数据加载器给出的同组非配对样本，不会跨
 CSV 的不同行可能只包含当时更新的部分指标，读取时应允许空值。可以使用
 Pandas、Excel 或其他绘图工具绘制 loss 曲线。
 
+参考图实验需要快速报告最新验证统计时，运行：
+
+```bash
+python scripts/report_reference_metrics.py
+```
+
+脚本只读取 `metrics.csv`，不读取图片、文件名或数据路径，并输出一行可以直接
+复制的汇总结果。默认路径是
+`experiments/custom_unpaired_reference_v6/logs/metrics.csv`；如果实验目录不同，
+可以把实际 CSV 路径作为第一个参数：
+
+```bash
+python scripts/report_reference_metrics.py /path/to/metrics.csv
+```
+
 断点续训时，将配置改为：
 
 ```yaml
