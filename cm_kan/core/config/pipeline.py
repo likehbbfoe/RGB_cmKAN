@@ -48,6 +48,8 @@ class UnsupervisedPipelineParams(DefaultPipelineParams):
     patch_nce_num_patches: int = Field(default=256, ge=2)
     patch_nce_temperature: float = Field(default=0.07, gt=0)
     reference_style_weight: float = Field(default=0.0, ge=0)
+    reference_white_balance_weight: float = Field(default=0.0, ge=0)
+    reference_white_balance_ramp_epochs: int = Field(default=0, ge=0)
     range_weight: float = Field(default=0.0, ge=0)
     warmup_epochs: int = Field(default=0, ge=0)
     gradient_clip_val: float = Field(default=0.0, ge=0)

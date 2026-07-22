@@ -13,6 +13,11 @@ class DataType(str, Enum):
     custom_unpaired = 'custom_unpaired'
 
 
+class PairingMode(str, Enum):
+    random = 'random'
+    weak_aligned = 'weak_aligned'
+
+
 class DataPathes(BaseModel):
     source: str
     target: str
@@ -28,6 +33,7 @@ class CustomUnpairedDataParams(BaseModel):
     num_workers: int = Field(default=4, ge=0)
     recursive: bool = True
     pair_by_subdirectory: bool = False
+    pairing_mode: PairingMode = PairingMode.random
     seed: int = 42
     image_extensions: Tuple[str, ...] = (
         ".png",

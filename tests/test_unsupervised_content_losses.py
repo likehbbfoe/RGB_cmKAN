@@ -58,3 +58,53 @@ def test_patch_nce_prefers_matching_spatial_features() -> None:
     matching_loss.backward()
     assert matching_query.grad is not None
     assert torch.isfinite(matching_query.grad).all()
+
+
+def test_white_balance_statistics_detect_warm_shift() -> None:
+    neutral = torch.full((1, 3, 16, 16), 0.5)
+    warm = neutral.clone()
+    warm[:, 0] = 0.62
+    warm[:, 2] = 0.38
+
+    neutral_stats = UnsupervisedPipeline._white_balance_statistics(neutral)
+    warm_stats = UnsupervisedPipeline._white_balance_statistics(warm)
+    deltas = warm_stats - neutral_stats
+    warm_bias = 0.5 * (deltas[:, 0] - deltas[:, 1])
+
+    assert neutral_stats.abs().max().item() < 1e-6
+    assert deltas[0, 0].item() > 0
+    assert deltas[0, 1].item() < 0
+    assert warm_bias.item() > 0
+
+
+def test_white_balance_statistics_have_finite_gradients() -> None:
+    prediction = torch.rand((2, 3, 16, 16), requires_grad=True)
+    reference = torch.rand((2, 3, 16, 16))
+    deltas = UnsupervisedPipeline._white_balance_statistics(prediction) - (
+        UnsupervisedPipeline._white_balance_statistics(reference).detach()
+    )
+    warm_delta = 0.5 * (deltas[:, 0] - deltas[:, 1])
+    tint_delta = 0.5 * (deltas[:, 0] + deltas[:, 1])
+    loss = (
+        UnsupervisedPipeline._charbonnier(warm_delta)
+        + 0.5 * UnsupervisedPipeline._charbonnier(tint_delta)
+    ).mean()
+
+    loss.backward()
+
+    assert prediction.grad is not None
+    assert torch.isfinite(prediction.grad).all()
+
+
+def test_white_balance_weight_ramps_by_absolute_epoch() -> None:
+    weights = [
+        UnsupervisedPipeline._ramped_weight(3.0, 5, epoch)
+        for epoch in range(7)
+    ]
+
+    expected = [0.6, 1.2, 1.8, 2.4, 3.0, 3.0, 3.0]
+    assert all(
+        abs(actual - target) < 1e-9
+        for actual, target in zip(weights, expected)
+    )
+    assert UnsupervisedPipeline._ramped_weight(3.0, 0, 157) == 3.0

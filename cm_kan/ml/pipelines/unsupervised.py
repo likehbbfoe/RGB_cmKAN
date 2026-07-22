@@ -37,6 +37,8 @@ class UnsupervisedPipeline(L.LightningModule):
         patch_nce_num_patches: int = 256,
         patch_nce_temperature: float = 0.07,
         reference_style_weight: float = 0.0,
+        reference_white_balance_weight: float = 0.0,
+        reference_white_balance_ramp_epochs: int = 0,
         range_weight: float = 0.0,
         warmup_epochs: int = 0,
         gradient_clip_val: float = 0.0,
@@ -58,6 +60,10 @@ class UnsupervisedPipeline(L.LightningModule):
         self.patch_nce_num_patches = patch_nce_num_patches
         self.patch_nce_temperature = patch_nce_temperature
         self.reference_style_weight = reference_style_weight
+        self.reference_white_balance_weight = reference_white_balance_weight
+        self.reference_white_balance_ramp_epochs = (
+            reference_white_balance_ramp_epochs
+        )
         self.range_weight = range_weight
         self.warmup_epochs = warmup_epochs
         self.gradient_clip_val = gradient_clip_val
@@ -124,6 +130,106 @@ class UnsupervisedPipeline(L.LightningModule):
             input_distance.mean(),
             prediction_distance.mean(),
             ratio.mean(),
+        )
+
+    @staticmethod
+    def _linearize_srgb(images):
+        images = images.clamp(0, 1)
+        return torch.where(
+            images <= 0.04045,
+            images / 12.92,
+            ((images + 0.055) / 1.055).pow(2.4),
+        )
+
+    @classmethod
+    def _white_balance_statistics(cls, images, eps=1e-3, sigma=0.35):
+        """Estimate robust per-image log(R/G) and log(B/G) color casts."""
+        linear_rgb = cls._linearize_srgb(images.float())
+        red, green, blue = linear_rgb.unbind(dim=1)
+        log_red_green = torch.log(red + eps) - torch.log(green + eps)
+        log_blue_green = torch.log(blue + eps) - torch.log(green + eps)
+        log_chroma = torch.stack(
+            [log_red_green, log_blue_green],
+            dim=1,
+        )
+
+        luminance = cls._luminance(linear_rgb)
+        valid_weight = (
+            torch.sigmoid((luminance - 0.01) / 0.01)
+            * torch.sigmoid((0.98 - luminance) / 0.02)
+        ).unsqueeze(1)
+        reduce_dims = (2, 3)
+        initial_center = (
+            (valid_weight * log_chroma).sum(dim=reduce_dims, keepdim=True)
+            / valid_weight.sum(dim=reduce_dims, keepdim=True).clamp_min(1e-6)
+        )
+        squared_distance = (
+            (log_chroma - initial_center.detach()).square().sum(
+                dim=1,
+                keepdim=True,
+            )
+        )
+        robust_weight = 0.05 + 0.95 * torch.exp(
+            -squared_distance / (2 * sigma * sigma)
+        )
+
+        # Pixel selection is not a prediction target. Detaching prevents the
+        # generator from lowering the loss by manipulating its own mask.
+        weights = (valid_weight * robust_weight).detach()
+        return (
+            (weights * log_chroma).sum(dim=reduce_dims)
+            / weights.sum(dim=reduce_dims).clamp_min(1e-6)
+        )
+
+    @staticmethod
+    def _charbonnier(values, delta=0.01):
+        return torch.sqrt(values.square() + delta * delta) - delta
+
+    def _reference_white_balance_loss(self, predictions, reference):
+        if not self.reference_guided:
+            return predictions.new_zeros(())
+        deltas = self._white_balance_statistics(predictions) - (
+            self._white_balance_statistics(reference).detach()
+        )
+        warm_delta = 0.5 * (deltas[:, 0] - deltas[:, 1])
+        tint_delta = 0.5 * (deltas[:, 0] + deltas[:, 1])
+        return (
+            self._charbonnier(warm_delta)
+            + 0.5 * self._charbonnier(tint_delta)
+        ).mean()
+
+    def _reference_white_balance_deltas(self, predictions, reference):
+        if not self.reference_guided:
+            zero = predictions.new_zeros(())
+            return zero, zero, zero, zero, zero
+        deltas = self._white_balance_statistics(predictions) - (
+            self._white_balance_statistics(reference).detach()
+        )
+        warm_deltas = 0.5 * (deltas[:, 0] - deltas[:, 1])
+        return (
+            deltas[:, 0].mean(),
+            deltas[:, 1].mean(),
+            warm_deltas.mean(),
+            warm_deltas.abs().mean(),
+            (warm_deltas > 0).float().mean(),
+        )
+
+    @staticmethod
+    def _ramped_weight(weight, ramp_epochs, current_epoch):
+        if ramp_epochs <= 0:
+            return weight
+        ramp_epoch = int(current_epoch) + 1
+        progress = min(
+            1.0,
+            ramp_epoch / ramp_epochs,
+        )
+        return weight * progress
+
+    def _effective_reference_white_balance_weight(self):
+        return self._ramped_weight(
+            self.reference_white_balance_weight,
+            self.reference_white_balance_ramp_epochs,
+            self.current_epoch,
         )
 
     def _cycle_loss(self, predictions, targets):
@@ -514,6 +620,15 @@ class UnsupervisedPipeline(L.LightningModule):
         referenceStyleB = self._reference_style_loss(fakeB, imgB)
         referenceStyleLoss = referenceStyleA + referenceStyleB
 
+        referenceWhiteBalanceA = self._reference_white_balance_loss(fakeA, imgA)
+        referenceWhiteBalanceB = self._reference_white_balance_loss(fakeB, imgB)
+        referenceWhiteBalanceLoss = (
+            referenceWhiteBalanceA + referenceWhiteBalanceB
+        )
+        effectiveReferenceWhiteBalanceWeight = (
+            self._effective_reference_white_balance_weight()
+        )
+
         rangeA = self._range_loss(fakeA)
         rangeB = self._range_loss(fakeB)
         rangeLoss = rangeA + rangeB
@@ -530,6 +645,7 @@ class UnsupervisedPipeline(L.LightningModule):
             + self.reflectance_weight * reflectanceLoss
             + self.patch_nce_weight * patchNceLoss
             + self.reference_style_weight * referenceStyleLoss
+            + effectiveReferenceWhiteBalanceWeight * referenceWhiteBalanceLoss
             + self.range_weight * rangeLoss
         )
 
@@ -556,6 +672,47 @@ class UnsupervisedPipeline(L.LightningModule):
         )
         self._log_loss(
             'gen_reference_style_b_loss', referenceStyleB, batch_size
+        )
+        self._log_loss(
+            'gen_reference_white_balance_a_loss',
+            referenceWhiteBalanceA,
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_white_balance_b_loss',
+            referenceWhiteBalanceB,
+            batch_size,
+        )
+        (
+            redGreenDeltaB,
+            blueGreenDeltaB,
+            warmBiasB,
+            warmAbsoluteB,
+            warmPositiveFractionB,
+        ) = (
+            self._reference_white_balance_deltas(fakeB.detach(), imgB)
+        )
+        self._log_loss(
+            'fake_b_reference_red_green_delta', redGreenDeltaB, batch_size
+        )
+        self._log_loss(
+            'fake_b_reference_blue_green_delta', blueGreenDeltaB, batch_size
+        )
+        self._log_loss(
+            'fake_b_reference_warm_bias', warmBiasB, batch_size
+        )
+        self._log_loss(
+            'fake_b_reference_warm_abs', warmAbsoluteB, batch_size
+        )
+        self._log_loss(
+            'fake_b_reference_warm_positive_fraction',
+            warmPositiveFractionB,
+            batch_size,
+        )
+        self._log_loss(
+            'effective_reference_white_balance_weight',
+            fakeB.new_tensor(effectiveReferenceWhiteBalanceWeight),
+            batch_size,
         )
         self._log_loss('gen_range_a_loss', rangeA, batch_size)
         self._log_loss('gen_range_b_loss', rangeB, batch_size)
@@ -757,6 +914,13 @@ class UnsupervisedPipeline(L.LightningModule):
             self._reference_style_loss(fake_source, source)
             + self._reference_style_loss(fake_target, target)
         )
+        reference_white_balance_loss = (
+            self._reference_white_balance_loss(fake_source, source)
+            + self._reference_white_balance_loss(fake_target, target)
+        )
+        effective_reference_white_balance_weight = (
+            self._effective_reference_white_balance_weight()
+        )
         range_loss = (
             self._range_loss(fake_source)
             + self._range_loss(fake_target)
@@ -771,6 +935,10 @@ class UnsupervisedPipeline(L.LightningModule):
             + self.reflectance_weight * reflectance_loss
             + self.patch_nce_weight * patch_nce_loss
             + self.reference_style_weight * reference_style_loss
+            + (
+                effective_reference_white_balance_weight
+                * reference_white_balance_loss
+            )
             + self.range_weight * range_loss
         )
         self.log(f'{stage}_cycle_loss', cycle_loss, prog_bar=False, logger=True)
@@ -797,6 +965,20 @@ class UnsupervisedPipeline(L.LightningModule):
             prog_bar=False,
             logger=True,
         )
+        self.log(
+            f'{stage}_reference_white_balance_loss',
+            reference_white_balance_loss,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_effective_reference_white_balance_weight',
+            reference_white_balance_loss.new_tensor(
+                effective_reference_white_balance_weight
+            ),
+            prog_bar=False,
+            logger=True,
+        )
         if self.reference_guided:
             input_distance, fake_distance, distance_ratio = (
                 self._reference_style_distances(source, fake_target, target)
@@ -816,6 +998,67 @@ class UnsupervisedPipeline(L.LightningModule):
             self.log(
                 f'{stage}_reference_style_ratio',
                 distance_ratio,
+                prog_bar=False,
+                logger=True,
+            )
+            (
+                red_green_delta,
+                blue_green_delta,
+                warm_bias,
+                warm_absolute,
+                warm_positive_fraction,
+            ) = (
+                self._reference_white_balance_deltas(
+                    fake_target,
+                    target,
+                )
+            )
+            (
+                _,
+                _,
+                source_warm_bias,
+                source_warm_absolute,
+                _,
+            ) = self._reference_white_balance_deltas(source, target)
+            self.log(
+                f'{stage}_fake_target_red_green_delta',
+                red_green_delta,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_fake_target_blue_green_delta',
+                blue_green_delta,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_fake_target_warm_bias',
+                warm_bias,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_fake_target_warm_abs',
+                warm_absolute,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_fake_target_warm_positive_fraction',
+                warm_positive_fraction,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_source_target_warm_bias',
+                source_warm_bias,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_source_target_warm_abs',
+                source_warm_absolute,
                 prog_bar=False,
                 logger=True,
             )

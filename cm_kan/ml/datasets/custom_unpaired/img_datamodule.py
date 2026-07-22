@@ -30,6 +30,76 @@ DEFAULT_IMAGE_EXTENSIONS = (
 )
 
 
+class WeakAlignedTrainTransform:
+    """Apply shared normalized crop positions and flips to a rough image pair."""
+
+    def __init__(
+        self,
+        resize_size: int,
+        crop_size: int,
+        horizontal_flip_probability: float,
+        vertical_flip_probability: float,
+    ) -> None:
+        self.prepare = Compose([
+            ToImageTensor(),
+            Resize(resize_size, antialias=True),
+            ConvertImageDtype(dtype=torch.float32),
+        ])
+        self.crop_size = crop_size
+        self.horizontal_flip_probability = horizontal_flip_probability
+        self.vertical_flip_probability = vertical_flip_probability
+
+    @staticmethod
+    def _crop_offset(length: int, crop_size: int, position: float) -> int:
+        available = length - crop_size
+        if available < 0:
+            raise ValueError(
+                f"Cannot crop size {crop_size} from resized dimension {length}"
+            )
+        return round(position * available)
+
+    def _crop(self, image, vertical_position, horizontal_position):
+        top = self._crop_offset(
+            image.shape[-2],
+            self.crop_size,
+            vertical_position,
+        )
+        left = self._crop_offset(
+            image.shape[-1],
+            self.crop_size,
+            horizontal_position,
+        )
+        return image[
+            ...,
+            top:top + self.crop_size,
+            left:left + self.crop_size,
+        ]
+
+    def __call__(self, source, target):
+        source = self.prepare(source)
+        target = self.prepare(target)
+        random_values = torch.rand(4).tolist()
+        vertical_position, horizontal_position = random_values[:2]
+        source = self._crop(
+            source,
+            vertical_position,
+            horizontal_position,
+        )
+        target = self._crop(
+            target,
+            vertical_position,
+            horizontal_position,
+        )
+
+        if random_values[2] < self.horizontal_flip_probability:
+            source = source.flip(-1)
+            target = target.flip(-1)
+        if random_values[3] < self.vertical_flip_probability:
+            source = source.flip(-2)
+            target = target.flip(-2)
+        return source, target
+
+
 def _find_images(
     directory: str,
     extensions: Tuple[str, ...],
@@ -100,6 +170,7 @@ class CustomUnpairedDataModule(L.LightningDataModule):
         pair_by_subdirectory: bool = False,
         seed: int = 42,
         image_extensions: Tuple[str, ...] = DEFAULT_IMAGE_EXTENSIONS,
+        pairing_mode: str = "random",
     ) -> None:
         super().__init__()
         if resize_size < crop_size:
@@ -126,6 +197,18 @@ class CustomUnpairedDataModule(L.LightningDataModule):
         if has_test_source != has_test_target:
             raise ValueError(
                 "test_source_dir and test_target_dir must be provided together"
+            )
+
+        self.pairing_mode = getattr(pairing_mode, "value", pairing_mode)
+        if self.pairing_mode not in ("random", "weak_aligned"):
+            raise ValueError(
+                "pairing_mode must be either 'random' or 'weak_aligned', "
+                f"got '{self.pairing_mode}'"
+            )
+        if self.pairing_mode == "weak_aligned" and not has_val_source:
+            raise ValueError(
+                "weak_aligned pairing requires explicit val_source_dir and "
+                "val_target_dir so approximate pairs are not split independently"
             )
 
         if has_val_source:
@@ -198,6 +281,12 @@ class CustomUnpairedDataModule(L.LightningDataModule):
             RandomVerticalFlip(p=vertical_flip_probability),
             ConvertImageDtype(dtype=torch.float32),
         ])
+        self.weak_aligned_train_transform = WeakAlignedTrainTransform(
+            resize_size=resize_size,
+            crop_size=crop_size,
+            horizontal_flip_probability=horizontal_flip_probability,
+            vertical_flip_probability=vertical_flip_probability,
+        )
         self.eval_transform = Compose([
             ToImageTensor(),
             Resize(resize_size, antialias=True),
@@ -219,6 +308,12 @@ class CustomUnpairedDataModule(L.LightningDataModule):
                 pair_by_subdirectory=self.pair_by_subdirectory,
                 source_root=self.train_source_root,
                 target_root=self.train_target_root,
+                pairing_mode=self.pairing_mode,
+                paired_transform=(
+                    self.weak_aligned_train_transform
+                    if self.pairing_mode == "weak_aligned"
+                    else None
+                ),
             )
             self.val_dataset = UnpairedImageDataset(
                 self.val_source_paths,
@@ -228,6 +323,7 @@ class CustomUnpairedDataModule(L.LightningDataModule):
                 pair_by_subdirectory=self.pair_by_subdirectory,
                 source_root=self.val_source_root,
                 target_root=self.val_target_root,
+                pairing_mode=self.pairing_mode,
             )
         if stage in ("test", None):
             self.test_dataset = UnpairedImageDataset(
@@ -238,6 +334,7 @@ class CustomUnpairedDataModule(L.LightningDataModule):
                 pair_by_subdirectory=self.pair_by_subdirectory,
                 source_root=self.test_source_root,
                 target_root=self.test_target_root,
+                pairing_mode=self.pairing_mode,
             )
 
     def _loader(

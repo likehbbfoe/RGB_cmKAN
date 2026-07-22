@@ -1,4 +1,4 @@
-experiment: custom_unpaired_reference_v6
+experiment: custom_weak_paired_reference_wb_v1
 save_dir: experiments
 resume: false
 accelerator: auto
@@ -33,6 +33,7 @@ data:
     num_workers: 4
     recursive: true
     pair_by_subdirectory: true
+    pairing_mode: weak_aligned
     seed: 42
 
 pipeline:
@@ -45,12 +46,12 @@ pipeline:
     val_batch_size: 1
     test_batch_size: 1
     epochs: 200
-    save_freq: 10
+    save_freq: 1
     visualize_freq: 1
     training_mode: adversarial
     pretrained: false
     pretrained_model: null
-    adversarial_weight: 2.0
+    adversarial_weight: 1.0
     cycle_weight: 5.0
     identity_weight: 1.0
     domain_statistics_weight: 0.0
@@ -60,7 +61,9 @@ pipeline:
     patch_nce_weight: 0.25
     patch_nce_num_patches: 256
     patch_nce_temperature: 0.07
-    reference_style_weight: 10.0
+    reference_style_weight: 5.0
+    reference_white_balance_weight: 3.0
+    reference_white_balance_ramp_epochs: 5
     range_weight: 1.0
     warmup_epochs: 0
     gradient_clip_val: 1.0

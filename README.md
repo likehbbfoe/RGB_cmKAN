@@ -123,10 +123,12 @@ distributions. The custom configuration uses a short identity warm-up, gradient
 clipping, output-range regularization, differentiable color/exposure moments,
 intensity-invariant chromaticity consistency, and log-domain reflectance
 consistency. The last two terms keep subject color and local intrinsic contrast
-while still permitting smooth illumination changes. Optional scene-grouped
-sampling draws unpaired source/target images only from matching relative
-subdirectories, and PatchNCE compares cmKAN contextual patches between each input
-and its own translation to preserve content without assuming pixel-aligned pairs.
+while still permitting smooth illumination changes. Optional scene-grouped sampling
+restricts source/target matching to corresponding relative subdirectories.
+`pairing_mode: weak_aligned` additionally creates a fixed rough correspondence and
+synchronizes geometric augmentation, while still avoiding pixel losses on imperfectly
+aligned pairs. PatchNCE compares cmKAN contextual patches between each input and its
+own translation to preserve content.
 Adjust image size, split ratios, batch size, and training length in
 `configs/custom_unpaired.example.yaml`.
 
@@ -135,16 +137,21 @@ Adjust image size, split ratios, batch size, and training length in
 When the target domain contains several color temperatures or exposure styles,
 use the reference-guided model so each translation follows one selected target
 image instead of collapsing to an average target look. The dataset layout stays
-exactly the same: every randomly sampled training target is the reference for
-that source batch.
+the same. The supplied reference configs use fixed weak alignment: a complete
+relative-filename correspondence is used when available; otherwise each scene
+directory is mapped by sorted position, including unequal source/target counts.
 
 Reference-guided checkpoints contain additional conditioning layers and must be
 trained from scratch:
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 \
-./scripts/train_custom_unpaired_reference.sh /absolute/path/to/my_dataset
+./scripts/train_custom_unpaired_reference.sh
 ```
+
+The server config starts a separate experiment named
+`custom_weak_paired_reference_wb_v1`, so existing v6 checkpoints and CSV logs are
+left untouched. Its white-balance weight ramps over the first five epochs.
 
 Use one target image as the reference for one source image or a source folder:
 

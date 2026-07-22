@@ -14,7 +14,7 @@ from typing import Iterable, Mapping
 DEFAULT_METRICS_PATH = Path(
     os.environ.get(
         "CMKAN_METRICS_PATH",
-        "experiments/custom_unpaired_reference_v6/logs/metrics.csv",
+        "experiments/custom_weak_paired_reference_wb_v1/logs/metrics.csv",
     )
 )
 
@@ -23,6 +23,14 @@ OUTPUT_METRICS = (
     ("fake_ref", "val_fake_reference_style_distance"),
     ("ratio", "val_reference_style_ratio"),
     ("reference_loss", "val_reference_style_loss"),
+    ("wb_loss", "val_reference_white_balance_loss"),
+    ("rg_delta", "val_fake_target_red_green_delta"),
+    ("bg_delta", "val_fake_target_blue_green_delta"),
+    ("warm_bias", "val_fake_target_warm_bias"),
+    ("warm_abs", "val_fake_target_warm_abs"),
+    ("warm_positive", "val_fake_target_warm_positive_fraction"),
+    ("source_warm", "val_source_target_warm_bias"),
+    ("source_warm_abs", "val_source_target_warm_abs"),
     ("fake_luma", "val_fake_target_luminance"),
     ("target_luma", "val_real_target_luminance"),
     ("range", "val_range_loss"),
