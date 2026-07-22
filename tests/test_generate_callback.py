@@ -23,7 +23,7 @@ def test_black_pixels_are_excluded_from_cie_xy() -> None:
     assert GenerateCallback._rgb_to_xy(black).shape == (0, 2)
 
 
-def test_distribution_tile_matches_preview_image_shape() -> None:
+def test_scatter_tile_matches_preview_image_shape() -> None:
     source = torch.linspace(0, 1, steps=48).reshape(1, 3, 4, 4)
     translated = (source * 0.8 + 0.1).clamp(0, 1)
     target = (source * 0.6 + 0.2).clamp(0, 1)
@@ -33,6 +33,6 @@ def test_distribution_tile_matches_preview_image_shape() -> None:
         target,
     )
 
-    assert preview.shape == (4, 3, 4, 4)
+    assert preview.shape == (4, 3, 8, 8)
     assert preview[3].min().item() >= 0
     assert preview[3].max().item() <= 1

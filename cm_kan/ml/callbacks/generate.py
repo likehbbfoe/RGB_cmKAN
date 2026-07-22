@@ -53,9 +53,36 @@ class GenerateCallback(Callback):
         sources: torch.Tensor,
         translated: torch.Tensor,
         targets: torch.Tensor,
+        preview_scale: int = 2,
     ) -> torch.Tensor:
         """Build source | translated | target | scatter rows."""
-        height, width = sources.shape[-2:]
+        sources = sources.detach().float().cpu()
+        translated = translated.detach().float().cpu()
+        targets = targets.detach().float().cpu()
+        source_height, source_width = sources.shape[-2:]
+        height = source_height * preview_scale
+        width = source_width * preview_scale
+        resized_sources = F.interpolate(
+            sources,
+            size=(height, width),
+            mode="bicubic",
+            align_corners=False,
+            antialias=True,
+        ).clamp(0, 1)
+        resized_translated = F.interpolate(
+            translated,
+            size=(height, width),
+            mode="bicubic",
+            align_corners=False,
+            antialias=True,
+        ).clamp(0, 1)
+        resized_targets = F.interpolate(
+            targets,
+            size=(height, width),
+            mode="bicubic",
+            align_corners=False,
+            antialias=True,
+        ).clamp(0, 1)
         scatter_tiles = torch.stack(
             [
                 cls._scatter_tile(
@@ -71,9 +98,9 @@ class GenerateCallback(Callback):
                     targets,
                 )
             ]
-        ).to(device=sources.device, dtype=sources.dtype)
+        )
         return torch.stack(
-            [sources, translated, targets, scatter_tiles],
+            [resized_sources, resized_translated, resized_targets, scatter_tiles],
             dim=1,
         ).flatten(0, 1)
 
@@ -113,19 +140,19 @@ class GenerateCallback(Callback):
         target: torch.Tensor,
         height: int,
         width: int,
-        max_points: int = 2500,
+        max_points: int = 600,
     ) -> torch.Tensor:
         """Render source, translated, and target CIE xy chromaticities."""
-        figure = Figure(figsize=(3.0, 3.0), dpi=100)
+        figure = Figure(figsize=(4.0, 4.0), dpi=200)
         canvas = FigureCanvasAgg(figure)
         axis = figure.subplots()
 
         series = (
-            ("Source", source, "#7B8794"),
-            ("Translated", translated, "#E76F51"),
-            ("Target", target, "#264653"),
+            ("Source", source, "#7B8794", 1, 0.20),
+            ("Target", target, "#264653", 2, 0.20),
+            ("Translated", translated, "#E76F51", 3, 0.42),
         )
-        for label, image, color in series:
+        for label, image, color, zorder, alpha in series:
             xy = cls._rgb_to_xy(image)
             if xy.shape[0] == 0:
                 continue
@@ -139,12 +166,13 @@ class GenerateCallback(Callback):
             axis.scatter(
                 sampled_xy[:, 0].numpy(),
                 sampled_xy[:, 1].numpy(),
-                s=3,
-                alpha=0.14,
+                s=8,
+                alpha=alpha,
                 color=color,
                 edgecolors="none",
                 rasterized=True,
                 label=label,
+                zorder=zorder,
             )
             centroid = xy.mean(dim=0)
             axis.scatter(
@@ -154,20 +182,21 @@ class GenerateCallback(Callback):
                 s=28,
                 linewidths=1.5,
                 color=color,
+                zorder=zorder + 1,
             )
 
         axis.set_xlim(0, 0.8)
         axis.set_ylim(0, 0.9)
         axis.set_aspect("equal", adjustable="box")
-        axis.set_xlabel("CIE x", fontsize=8)
-        axis.set_ylabel("CIE y", fontsize=8)
-        axis.set_title("CIE 1931 xy chromaticity", fontsize=9, fontweight="bold")
-        axis.tick_params(labelsize=7)
-        axis.grid(alpha=0.18, linewidth=0.6)
+        axis.set_xlabel("CIE x", fontsize=10)
+        axis.set_ylabel("CIE y", fontsize=10)
+        axis.set_title("CIE 1931 xy chromaticity", fontsize=11, fontweight="bold")
+        axis.tick_params(labelsize=9)
+        axis.grid(alpha=0.18, linewidth=0.7)
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)
-        axis.legend(frameon=False, fontsize=6, loc="upper right", markerscale=2)
-        figure.tight_layout(pad=0.5)
+        axis.legend(frameon=False, fontsize=8, loc="upper right", markerscale=2)
+        figure.tight_layout(pad=0.7)
 
         canvas.draw()
         rgba = np.asarray(canvas.buffer_rgba()).copy()
