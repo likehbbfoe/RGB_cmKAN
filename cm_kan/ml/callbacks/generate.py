@@ -230,12 +230,12 @@ class GenerateCallback(Callback):
         axis = figure.subplots()
 
         series = (
-            ("Source", source, "#7B8794", 1, 0.20),
-            ("Target", target, "#264653", 2, 0.20),
-            ("Translated", translated, "#E76F51", 3, 0.42),
+            ("Source", source, "#0072B2", "o", 1, 0.32),
+            ("Target", target, "#CC79A7", "^", 2, 0.32),
+            ("Translated", translated, "#E69F00", "D", 3, 0.55),
         )
         prepared_series = []
-        for label, image, color, zorder, alpha in series:
+        for label, image, color, marker, zorder, alpha in series:
             xy = cls._rgb_to_xy(image)
             if xy.shape[0] == 0:
                 continue
@@ -247,20 +247,29 @@ class GenerateCallback(Callback):
             ).long()
             sampled_xy = xy[point_indices]
             prepared_series.append(
-                (label, color, zorder, alpha, xy, sampled_xy)
+                (label, color, marker, zorder, alpha, xy, sampled_xy)
             )
 
         if not prepared_series:
             raise ValueError("No valid chromaticity points found for preview")
 
         centroids = {}
-        for label, color, zorder, alpha, xy, sampled_xy in prepared_series:
+        for (
+            label,
+            color,
+            marker,
+            zorder,
+            alpha,
+            xy,
+            sampled_xy,
+        ) in prepared_series:
             axis.scatter(
                 sampled_xy[:, 0].numpy(),
                 sampled_xy[:, 1].numpy(),
                 s=8,
                 alpha=alpha,
                 color=color,
+                marker=marker,
                 edgecolors="none",
                 rasterized=True,
                 label=label,
@@ -271,10 +280,11 @@ class GenerateCallback(Callback):
             axis.scatter(
                 centroid[0].item(),
                 centroid[1].item(),
-                marker="x",
-                s=28,
-                linewidths=1.5,
+                marker="X",
+                s=60,
+                linewidths=0.7,
                 color=color,
+                edgecolors="white",
                 zorder=zorder + 1,
             )
 
