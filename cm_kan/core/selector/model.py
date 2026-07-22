@@ -5,6 +5,7 @@ from cm_kan.ml.models import (
     CmKAN,
     LightCmKAN,
     CycleCmKAN,
+    ReferenceCycleCmKAN,
 )
 
 
@@ -31,6 +32,15 @@ class ModelSelector:
                 )
             case ModelType.cycle_cm_kan:
                 return CycleCmKAN(
+                    in_dims=config.model.params.in_dims,
+                    out_dims=config.model.params.out_dims,
+                    grid_size=config.model.params.grid_size,
+                    spline_order=config.model.params.spline_order,
+                    residual_std=config.model.params.residual_std,
+                    grid_range=config.model.params.grid_range,
+                )
+            case ModelType.reference_cycle_cm_kan:
+                return ReferenceCycleCmKAN(
                     in_dims=config.model.params.in_dims,
                     out_dims=config.model.params.out_dims,
                     grid_size=config.model.params.grid_size,

@@ -9,7 +9,7 @@ from .generator import GeneratorLayer, LightGeneratorLayer
 class CmKANLayer(torch.nn.Module):
 
     def __init__(self, in_channels, out_channels, grid_size, spline_order,
-                 residual_std, grid_range):
+                 residual_std, grid_range, condition_dim=0):
         super(CmKANLayer, self).__init__()
 
         self.kan_layer = KANLayer(in_dim=in_channels,
@@ -34,7 +34,11 @@ class CmKANLayer(torch.nn.Module):
         self.kan_params_num = np.sum(self.kan_params_indices)
         self.kan_params_indices = np.cumsum(self.kan_params_indices)
 
-        self.generator = GeneratorLayer(in_channels, self.kan_params_num)
+        self.generator = GeneratorLayer(
+            in_channels,
+            self.kan_params_num,
+            condition_dim=condition_dim,
+        )
 
     def kan(self, x, w):
 
@@ -67,23 +71,27 @@ class CmKANLayer(torch.nn.Module):
 
         return x
 
-    def encode(self, x):
+    def encode(self, x, condition=None):
         """Expose the contextual features that produce spatial KAN weights."""
-        return self.generator.encode(x)
+        return self.generator.encode(x, condition)
 
-    def forward_with_features(self, x):
+    def forward_with_features(self, x, condition=None):
         """Return the translated image and its input contextual features."""
-        weights, features = self.generator.forward_with_features(x)
+        weights, features = self.generator.forward_with_features(x, condition)
         return self._apply_spatial_kan(x, weights), features
 
-    def forward(self, x):
-        output, _ = self.forward_with_features(x)
+    def forward(self, x, condition=None):
+        output, _ = self.forward_with_features(x, condition)
         return output
     
 
 class LightCmKANLayer(CmKANLayer):
     def __init__(self, in_channels, out_channels, grid_size, spline_order,
-                 residual_std, grid_range):
+                 residual_std, grid_range, condition_dim=0):
         super(LightCmKANLayer, self).__init__(in_channels, out_channels, grid_size, spline_order,
-                 residual_std, grid_range)
-        self.generator = LightGeneratorLayer(in_channels, self.kan_params_num)
+                 residual_std, grid_range, condition_dim=condition_dim)
+        self.generator = LightGeneratorLayer(
+            in_channels,
+            self.kan_params_num,
+            condition_dim=condition_dim,
+        )

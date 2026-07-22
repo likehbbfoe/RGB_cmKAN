@@ -7,6 +7,7 @@ class ModelType(str, Enum):
     cm_kan = 'cm_kan'
     light_cm_kan = 'light_cm_kan'
     cycle_cm_kan = 'cycle_cm_kan'
+    reference_cycle_cm_kan = 'reference_cycle_cm_kan'
     
 
 class CmKanModelParams(BaseModel):

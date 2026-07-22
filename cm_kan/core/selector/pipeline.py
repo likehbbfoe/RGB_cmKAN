@@ -42,6 +42,7 @@ class PipelineSelector:
                     patch_nce_weight=config.pipeline.params.patch_nce_weight,
                     patch_nce_num_patches=config.pipeline.params.patch_nce_num_patches,
                     patch_nce_temperature=config.pipeline.params.patch_nce_temperature,
+                    reference_style_weight=config.pipeline.params.reference_style_weight,
                     range_weight=config.pipeline.params.range_weight,
                     warmup_epochs=config.pipeline.params.warmup_epochs,
                     gradient_clip_val=config.pipeline.params.gradient_clip_val,

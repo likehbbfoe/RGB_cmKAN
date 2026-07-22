@@ -36,6 +36,7 @@ class UnsupervisedPipeline(L.LightningModule):
         patch_nce_weight: float = 0.0,
         patch_nce_num_patches: int = 256,
         patch_nce_temperature: float = 0.07,
+        reference_style_weight: float = 0.0,
         range_weight: float = 0.0,
         warmup_epochs: int = 0,
         gradient_clip_val: float = 0.0,
@@ -56,6 +57,7 @@ class UnsupervisedPipeline(L.LightningModule):
         self.patch_nce_weight = patch_nce_weight
         self.patch_nce_num_patches = patch_nce_num_patches
         self.patch_nce_temperature = patch_nce_temperature
+        self.reference_style_weight = reference_style_weight
         self.range_weight = range_weight
         self.warmup_epochs = warmup_epochs
         self.gradient_clip_val = gradient_clip_val
@@ -77,12 +79,52 @@ class UnsupervisedPipeline(L.LightningModule):
         if self.pretrained and not self.pretrained_model:
             raise ValueError("pretrained_model is required when pretrained is true")
         self.reverse_prediction = reverse_prediction
+        self.reference_guided = getattr(model, "reference_guided", False)
+        if self.reference_guided and not self.adversarial:
+            raise ValueError(
+                "reference_cycle_cm_kan requires training_mode='adversarial'"
+            )
 
         self.save_hyperparameters(ignore=['model', 'reverse_prediction'])
 
     def _identity_loss(self, predictions, targets):
         mae_loss = self.mae_loss(predictions, targets)
         return mae_loss
+
+    def _style_condition(self, inputs, reference):
+        if not self.reference_guided:
+            return None
+        if reference is None:
+            raise ValueError(
+                "reference_cycle_cm_kan requires a target reference image"
+            )
+        return self.model.style_condition(inputs, reference)
+
+    def _reference_style_loss(self, predictions, reference):
+        if not self.reference_guided:
+            return predictions.new_zeros(())
+        predicted_style = self.model.encode_style(predictions)
+        reference_style = self.model.encode_style(reference).detach()
+        return F.l1_loss(predicted_style, reference_style)
+
+    def _reference_style_distances(self, inputs, predictions, reference):
+        """Return per-image input/reference and prediction/reference distances."""
+        if not self.reference_guided:
+            zero = predictions.new_zeros(())
+            return zero, zero, zero
+        reference_style = self.model.encode_style(reference).detach()
+        input_distance = (
+            self.model.encode_style(inputs).detach() - reference_style
+        ).abs().mean(dim=1)
+        prediction_distance = (
+            self.model.encode_style(predictions) - reference_style
+        ).abs().mean(dim=1)
+        ratio = prediction_distance / input_distance.clamp_min(1e-6)
+        return (
+            input_distance.mean(),
+            prediction_distance.mean(),
+            ratio.mean(),
+        )
 
     def _cycle_loss(self, predictions, targets):
         mae_loss = self.mae_loss(predictions, targets)
@@ -298,6 +340,13 @@ class UnsupervisedPipeline(L.LightningModule):
                     nn.init.normal_(m.weight, 0, 0.01)
                     nn.init.constant_(m.bias, 0)
 
+            if self.reference_guided:
+                for module in self.model.modules():
+                    style_affine = getattr(module, "style_affine", None)
+                    if style_affine is not None:
+                        nn.init.zeros_(style_affine[-1].weight)
+                        nn.init.zeros_(style_affine[-1].bias)
+
             if self.pretrained:
                 pipeline = UnsupervisedPipeline.load_from_checkpoint(
                     self.pretrained_model,
@@ -357,21 +406,37 @@ class UnsupervisedPipeline(L.LightningModule):
             schD = optim.lr_scheduler.LambdaLR(optD, lr_lambda=gamma)
             return [optG, optD], [schG, schD]
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pred = self.model.gen_ab(x)
+    def forward(
+        self,
+        x: torch.Tensor,
+        reference: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        condition = self._style_condition(x, reference)
+        pred = self.model.gen_ab(x, condition)
         return pred
     
-    def reversed_forward(self, x: torch.Tensor) -> torch.Tensor:
-        pred = self.model.gen_ba(x)
+    def reversed_forward(
+        self,
+        x: torch.Tensor,
+        reference: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        condition = self._style_condition(x, reference)
+        pred = self.model.gen_ba(x, condition)
         return pred
     
-    def generator_training_step(self, imgA, imgB):        
+    def generator_training_step(self, imgA, imgB):
         """cycle images - using only generator nets"""
+        conditionB = self._style_condition(imgA, imgB)
+        conditionA = self._style_condition(imgB, imgA)
         if self.patch_nce_weight > 0:
-            fakeB, source_features = self.model.gen_ab.forward_with_features(imgA)
-            fakeA, target_features = self.model.gen_ba.forward_with_features(imgB)
-            fakeB_features = self.model.gen_ab.encode_features(fakeB)
-            fakeA_features = self.model.gen_ba.encode_features(fakeA)
+            fakeB, source_features = self.model.gen_ab.forward_with_features(
+                imgA, conditionB
+            )
+            fakeA, target_features = self.model.gen_ba.forward_with_features(
+                imgB, conditionA
+            )
+            fakeB_features = self.model.gen_ab.encode_features(fakeB, conditionB)
+            fakeA_features = self.model.gen_ba.encode_features(fakeA, conditionA)
             patchNceB = self._patch_nce_loss(
                 fakeB_features,
                 source_features,
@@ -385,17 +450,23 @@ class UnsupervisedPipeline(L.LightningModule):
                 self.patch_nce_temperature,
             )
         else:
-            fakeB = self.model.gen_ab(imgA)
-            fakeA = self.model.gen_ba(imgB)
+            fakeB = self.model.gen_ab(imgA, conditionB)
+            fakeA = self.model.gen_ba(imgB, conditionA)
             patchNceA = fakeA.new_zeros(())
             patchNceB = fakeB.new_zeros(())
         patchNceLoss = patchNceA + patchNceB
 
-        cycledA = self.model.gen_ba(fakeB)
-        cycledB = self.model.gen_ab(fakeA)
+        cycledA = self.model.gen_ba(
+            fakeB,
+            self._style_condition(fakeB, imgA),
+        )
+        cycledB = self.model.gen_ab(
+            fakeA,
+            self._style_condition(fakeA, imgB),
+        )
         
-        sameB = self.model.gen_ab(imgB)
-        sameA = self.model.gen_ba(imgA)
+        sameB = self.model.gen_ab(imgB, self._style_condition(imgB, imgB))
+        sameA = self.model.gen_ba(imgA, self._style_condition(imgA, imgA))
         
         # generator gen_ab must fool discrim dis_b so label is real = 1
         predFakeB = self.model.dis_b(fakeB)
@@ -439,6 +510,10 @@ class UnsupervisedPipeline(L.LightningModule):
             reflectanceB = fakeB.new_zeros(())
         reflectanceLoss = reflectanceA + reflectanceB
 
+        referenceStyleA = self._reference_style_loss(fakeA, imgA)
+        referenceStyleB = self._reference_style_loss(fakeB, imgB)
+        referenceStyleLoss = referenceStyleA + referenceStyleB
+
         rangeA = self._range_loss(fakeA)
         rangeB = self._range_loss(fakeB)
         rangeLoss = rangeA + rangeB
@@ -454,6 +529,7 @@ class UnsupervisedPipeline(L.LightningModule):
             + self.chroma_weight * chromaLoss
             + self.reflectance_weight * reflectanceLoss
             + self.patch_nce_weight * patchNceLoss
+            + self.reference_style_weight * referenceStyleLoss
             + self.range_weight * rangeLoss
         )
 
@@ -475,6 +551,12 @@ class UnsupervisedPipeline(L.LightningModule):
         self._log_loss('gen_reflectance_b_loss', reflectanceB, batch_size)
         self._log_loss('gen_patch_nce_a_loss', patchNceA, batch_size)
         self._log_loss('gen_patch_nce_b_loss', patchNceB, batch_size)
+        self._log_loss(
+            'gen_reference_style_a_loss', referenceStyleA, batch_size
+        )
+        self._log_loss(
+            'gen_reference_style_b_loss', referenceStyleB, batch_size
+        )
         self._log_loss('gen_range_a_loss', rangeA, batch_size)
         self._log_loss('gen_range_b_loss', rangeB, batch_size)
         self._log_loss(
@@ -498,6 +580,24 @@ class UnsupervisedPipeline(L.LightningModule):
 
     def generator_warmup_step(self, imgA, imgB):
         """Initialize both generators near identity before adversarial updates."""
+        if self.reference_guided:
+            sameB = self.model.gen_ab(
+                imgB,
+                self._style_condition(imgB, imgB),
+            )
+            sameA = self.model.gen_ba(
+                imgA,
+                self._style_condition(imgA, imgA),
+            )
+            warmup_loss = (
+                self._cycle_loss(sameB, imgB)
+                + self._cycle_loss(sameA, imgA)
+            )
+            self._log_loss(
+                'warmup_loss', warmup_loss, imgA.shape[0], prog_bar=True
+            )
+            return warmup_loss
+
         fakeB = self.model.gen_ab(imgA)
         fakeA = self.model.gen_ba(imgB)
         sameB = self.model.gen_ab(imgB)
@@ -569,23 +669,29 @@ class UnsupervisedPipeline(L.LightningModule):
 
     def _unpaired_evaluation_step(self, batch, stage: str):
         source, target = self._unpack_adversarial_batch(batch)
+        target_condition = self._style_condition(source, target)
+        source_condition = self._style_condition(target, source)
         if self.patch_nce_weight > 0:
             fake_target, source_features = self.model.gen_ab.forward_with_features(
-                source
+                source, target_condition
             )
             fake_source, target_features = self.model.gen_ba.forward_with_features(
-                target
+                target, source_condition
             )
             patch_nce_loss = (
                 self._patch_nce_loss(
-                    self.model.gen_ab.encode_features(fake_target),
+                    self.model.gen_ab.encode_features(
+                        fake_target, target_condition
+                    ),
                     source_features,
                     self.patch_nce_num_patches,
                     self.patch_nce_temperature,
                     random_sampling=False,
                 )
                 + self._patch_nce_loss(
-                    self.model.gen_ba.encode_features(fake_source),
+                    self.model.gen_ba.encode_features(
+                        fake_source, source_condition
+                    ),
                     target_features,
                     self.patch_nce_num_patches,
                     self.patch_nce_temperature,
@@ -593,13 +699,25 @@ class UnsupervisedPipeline(L.LightningModule):
                 )
             )
         else:
-            fake_target = self.model.gen_ab(source)
-            fake_source = self.model.gen_ba(target)
+            fake_target = self.model.gen_ab(source, target_condition)
+            fake_source = self.model.gen_ba(target, source_condition)
             patch_nce_loss = fake_target.new_zeros(())
-        cycled_source = self.model.gen_ba(fake_target)
-        cycled_target = self.model.gen_ab(fake_source)
-        same_source = self.model.gen_ba(source)
-        same_target = self.model.gen_ab(target)
+        cycled_source = self.model.gen_ba(
+            fake_target,
+            self._style_condition(fake_target, source),
+        )
+        cycled_target = self.model.gen_ab(
+            fake_source,
+            self._style_condition(fake_source, target),
+        )
+        same_source = self.model.gen_ba(
+            source,
+            self._style_condition(source, source),
+        )
+        same_target = self.model.gen_ab(
+            target,
+            self._style_condition(target, target),
+        )
 
         cycle_loss = (
             self._cycle_loss(cycled_source, source)
@@ -635,6 +753,10 @@ class UnsupervisedPipeline(L.LightningModule):
             )
         else:
             reflectance_loss = fake_source.new_zeros(())
+        reference_style_loss = (
+            self._reference_style_loss(fake_source, source)
+            + self._reference_style_loss(fake_target, target)
+        )
         range_loss = (
             self._range_loss(fake_source)
             + self._range_loss(fake_target)
@@ -648,6 +770,7 @@ class UnsupervisedPipeline(L.LightningModule):
             + self.chroma_weight * chroma_loss
             + self.reflectance_weight * reflectance_loss
             + self.patch_nce_weight * patch_nce_loss
+            + self.reference_style_weight * reference_style_loss
             + self.range_weight * range_loss
         )
         self.log(f'{stage}_cycle_loss', cycle_loss, prog_bar=False, logger=True)
@@ -668,6 +791,34 @@ class UnsupervisedPipeline(L.LightningModule):
             prog_bar=False,
             logger=True,
         )
+        self.log(
+            f'{stage}_reference_style_loss',
+            reference_style_loss,
+            prog_bar=False,
+            logger=True,
+        )
+        if self.reference_guided:
+            input_distance, fake_distance, distance_ratio = (
+                self._reference_style_distances(source, fake_target, target)
+            )
+            self.log(
+                f'{stage}_source_reference_style_distance',
+                input_distance,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_fake_reference_style_distance',
+                fake_distance,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_reference_style_ratio',
+                distance_ratio,
+                prog_bar=False,
+                logger=True,
+            )
         self.log(f'{stage}_range_loss', range_loss, prog_bar=False, logger=True)
         self.log(
             f'{stage}_fake_source_luminance',
@@ -787,6 +938,19 @@ class UnsupervisedPipeline(L.LightningModule):
         return {'loss': mae_loss}
     
     def predict_step(self, batch, batch_idx):
+        if self.reference_guided:
+            if len(batch) != 3:
+                raise ValueError(
+                    "Reference-guided prediction expects "
+                    "(paths, inputs, references)"
+                )
+            pathes, inputs, references = batch
+            if self.reverse_prediction:
+                output = self.reversed_forward(inputs, references)
+            else:
+                output = self(inputs, references)
+            return output
+
         if self.reverse_prediction:
             pathes, inputs = batch
             output = self.reversed_forward(inputs)

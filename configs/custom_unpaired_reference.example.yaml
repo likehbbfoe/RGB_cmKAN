@@ -1,10 +1,10 @@
-experiment: custom_unpaired_weak_nce_v4
+experiment: custom_unpaired_reference_v6
 save_dir: experiments
 resume: false
-accelerator: gpu
+accelerator: auto
 
 model:
-  type: cycle_cm_kan
+  type: reference_cycle_cm_kan
   params:
     in_dims:
       - 3
@@ -20,11 +20,11 @@ model:
 data:
   type: custom_unpaired
   train:
-    source: /home/share/y50063074/data/train/source
-    target: /home/share/y50063074/data/train/target
+    source: data/custom_unpaired/train/source
+    target: data/custom_unpaired/train/target
   val:
-    source: /home/share/y50063074/data/val/source
-    target: /home/share/y50063074/data/val/target
+    source: data/custom_unpaired/val/source
+    target: data/custom_unpaired/val/target
   params:
     crop_size: 256
     resize_size: 286
@@ -50,18 +50,18 @@ pipeline:
     training_mode: adversarial
     pretrained: false
     pretrained_model: null
-    adversarial_weight: 1.0
-    cycle_weight: 10.0
-    identity_weight: 5.0
-    domain_statistics_weight: 1.0
-    exposure_weight: 2.0
-    chroma_weight: 2.0
-    reflectance_weight: 1.0
-    patch_nce_weight: 1.0
+    adversarial_weight: 2.0
+    cycle_weight: 5.0
+    identity_weight: 1.0
+    domain_statistics_weight: 0.0
+    exposure_weight: 0.0
+    chroma_weight: 0.0
+    reflectance_weight: 0.5
+    patch_nce_weight: 0.25
     patch_nce_num_patches: 256
     patch_nce_temperature: 0.07
-    reference_style_weight: 0.0
+    reference_style_weight: 10.0
     range_weight: 1.0
-    warmup_epochs: 5
+    warmup_epochs: 0
     gradient_clip_val: 1.0
     discriminator_lr_scale: 1.0

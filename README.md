@@ -130,6 +130,40 @@ and its own translation to preserve content without assuming pixel-aligned pairs
 Adjust image size, split ratios, batch size, and training length in
 `configs/custom_unpaired.example.yaml`.
 
+### Reference-guided unpaired color transfer
+
+When the target domain contains several color temperatures or exposure styles,
+use the reference-guided model so each translation follows one selected target
+image instead of collapsing to an average target look. The dataset layout stays
+exactly the same: every randomly sampled training target is the reference for
+that source batch.
+
+Reference-guided checkpoints contain additional conditioning layers and must be
+trained from scratch:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 \
+./scripts/train_custom_unpaired_reference.sh /absolute/path/to/my_dataset
+```
+
+Use one target image as the reference for one source image or a source folder:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 python main.py predict \
+  --config configs/custom_unpaired_reference.server.yaml \
+  --weights logs/checkpoints/last.ckpt \
+  --input /absolute/path/to/source_images \
+  --reference /absolute/path/to/target_reference.jpg \
+  --output results/reference_guided \
+  --batch_size 1
+```
+
+The reference contributes global linear-RGB, CIE chromaticity, luminance, and
+contrast statistics; it does not copy the reference scene or subject. See the
+[Chinese custom unpaired guide](docs/custom_unpaired_training_zh.md#-参考图引导模式当前数据推荐)
+for the training loss, configuration rationale, and a same-source/different-reference
+comparison procedure.
+
 
 
 ## How To Use

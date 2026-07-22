@@ -108,7 +108,10 @@ class GenerateCallback(Callback):
         for index in range(self.input_imgs.shape[0]):
             source = self.input_imgs[index : index + 1]
             target = self.target_imgs[index : index + 1]
-            prediction = pl_module(source)
+            if getattr(pl_module, "reference_guided", False):
+                prediction = pl_module(source, target)
+            else:
+                prediction = pl_module(source)
             preview_rows.append(
                 self._four_column_preview(source, prediction, target)
             )
