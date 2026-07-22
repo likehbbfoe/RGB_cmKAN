@@ -3,19 +3,24 @@ import torch
 from cm_kan.ml.callbacks.generate import GenerateCallback
 
 
-def test_color_statistics_use_display_range_and_normalized_histogram() -> None:
-    image = torch.tensor(
-        [[[-0.2, 1.2]], [[0.25, 0.75]], [[0.5, 0.5]]]
-    )
+def test_srgb_primaries_convert_to_expected_cie_xy() -> None:
+    primaries = torch.eye(3).reshape(3, 1, 3).permute(2, 0, 1)
+    xy = GenerateCallback._rgb_to_xy(primaries)
 
-    values = GenerateCallback._display_values(image)
-    _, histogram = GenerateCallback._histogram(values, bins=4)
-
-    assert torch.equal(
-        values,
-        torch.tensor([0.0, 1.0, 0.25, 0.75, 0.5, 0.5]),
+    expected = torch.tensor(
+        [
+            [0.6400, 0.3300],
+            [0.3000, 0.6000],
+            [0.1500, 0.0600],
+        ]
     )
-    assert abs(sum(histogram) - 1.0) < 1e-6
+    assert torch.allclose(xy, expected, atol=1e-4)
+
+
+def test_black_pixels_are_excluded_from_cie_xy() -> None:
+    black = torch.zeros(3, 2, 2)
+
+    assert GenerateCallback._rgb_to_xy(black).shape == (0, 2)
 
 
 def test_distribution_tile_matches_preview_image_shape() -> None:

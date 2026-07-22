@@ -54,11 +54,11 @@ class GenerateCallback(Callback):
         translated: torch.Tensor,
         targets: torch.Tensor,
     ) -> torch.Tensor:
-        """Build source | translated | target | distribution rows."""
+        """Build source | translated | target | scatter rows."""
         height, width = sources.shape[-2:]
-        distribution_tiles = torch.stack(
+        scatter_tiles = torch.stack(
             [
-                cls._distribution_tile(
+                cls._scatter_tile(
                     source,
                     prediction,
                     target,
@@ -73,64 +73,100 @@ class GenerateCallback(Callback):
             ]
         ).to(device=sources.device, dtype=sources.dtype)
         return torch.stack(
-            [sources, translated, targets, distribution_tiles],
+            [sources, translated, targets, scatter_tiles],
             dim=1,
         ).flatten(0, 1)
 
     @staticmethod
-    def _display_values(image: torch.Tensor) -> torch.Tensor:
-        """Return all displayed RGB pixel values as one clipped distribution."""
-        return image.detach().float().clamp(0, 1).cpu().flatten()
-
-    @staticmethod
-    def _histogram(values: torch.Tensor, bins: int = 64) -> tuple[list, list]:
-        """Create a normalized histogram for values displayed in [0, 1]."""
-        histogram = torch.histc(values, bins=bins, min=0.0, max=1.0)
-        histogram /= histogram.sum().clamp_min(1)
-        centers = (torch.arange(bins, dtype=torch.float32) + 0.5) / bins
-        return centers.tolist(), histogram.tolist()
+    def _rgb_to_xy(image: torch.Tensor) -> torch.Tensor:
+        """Convert a CHW sRGB image to valid CIE 1931 xy chromaticities."""
+        srgb = (
+            image.detach()
+            .float()
+            .clamp(0, 1)
+            .cpu()
+            .permute(1, 2, 0)
+            .reshape(-1, 3)
+        )
+        linear_rgb = torch.where(
+            srgb <= 0.04045,
+            srgb / 12.92,
+            ((srgb + 0.055) / 1.055).pow(2.4),
+        )
+        rgb_to_xyz = linear_rgb.new_tensor(
+            [
+                [0.4124564, 0.3575761, 0.1804375],
+                [0.2126729, 0.7151522, 0.0721750],
+                [0.0193339, 0.1191920, 0.9503041],
+            ]
+        )
+        xyz = linear_rgb @ rgb_to_xyz.T
+        xyz_sum = xyz.sum(dim=1)
+        valid = xyz_sum > 1e-6
+        return xyz[valid, :2] / xyz_sum[valid, None]
 
     @classmethod
-    def _distribution_tile(
+    def _scatter_tile(
         cls,
         source: torch.Tensor,
         translated: torch.Tensor,
         target: torch.Tensor,
         height: int,
         width: int,
+        max_points: int = 2500,
     ) -> torch.Tensor:
-        """Render a compact all-channel pixel distribution as an image tile."""
+        """Render source, translated, and target CIE xy chromaticities."""
         figure = Figure(figsize=(3.0, 3.0), dpi=100)
         canvas = FigureCanvasAgg(figure)
         axis = figure.subplots()
 
         series = (
-            ("Source", source, "#7B8794", "--"),
-            ("Translated", translated, "#E76F51", "-"),
-            ("Target", target, "#264653", ":"),
+            ("Source", source, "#7B8794"),
+            ("Translated", translated, "#E76F51"),
+            ("Target", target, "#264653"),
         )
-        for label, image, color, line_style in series:
-            values = cls._display_values(image)
-            x_values, probabilities = cls._histogram(values)
-            axis.plot(
-                x_values,
-                probabilities,
-                label=f"{label} ({values.mean().item():.3f})",
+        for label, image, color in series:
+            xy = cls._rgb_to_xy(image)
+            if xy.shape[0] == 0:
+                continue
+            point_count = min(max_points, xy.shape[0])
+            point_indices = torch.linspace(
+                0,
+                xy.shape[0] - 1,
+                steps=point_count,
+            ).long()
+            sampled_xy = xy[point_indices]
+            axis.scatter(
+                sampled_xy[:, 0].numpy(),
+                sampled_xy[:, 1].numpy(),
+                s=3,
+                alpha=0.14,
                 color=color,
-                linestyle=line_style,
-                linewidth=1.8,
+                edgecolors="none",
+                rasterized=True,
+                label=label,
+            )
+            centroid = xy.mean(dim=0)
+            axis.scatter(
+                centroid[0].item(),
+                centroid[1].item(),
+                marker="x",
+                s=28,
+                linewidths=1.5,
+                color=color,
             )
 
-        axis.set_xlim(0, 1)
-        axis.set_ylim(bottom=0)
-        axis.set_xlabel("Pixel value", fontsize=8)
-        axis.set_ylabel("Proportion", fontsize=8)
-        axis.set_title("Pixel distribution", fontsize=9, fontweight="bold")
+        axis.set_xlim(0, 0.8)
+        axis.set_ylim(0, 0.9)
+        axis.set_aspect("equal", adjustable="box")
+        axis.set_xlabel("CIE x", fontsize=8)
+        axis.set_ylabel("CIE y", fontsize=8)
+        axis.set_title("CIE 1931 xy chromaticity", fontsize=9, fontweight="bold")
         axis.tick_params(labelsize=7)
         axis.grid(alpha=0.18, linewidth=0.6)
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)
-        axis.legend(frameon=False, fontsize=6, loc="upper right")
+        axis.legend(frameon=False, fontsize=6, loc="upper right", markerscale=2)
         figure.tight_layout(pad=0.5)
 
         canvas.draw()

@@ -412,14 +412,15 @@ experiments/custom_unpaired/
 为四列：
 
 ```text
-source | source_to_target | 真实 target | 普通像素分布图
+source | source_to_target | 真实 target | CIE 1931 xy 色度散点图
 ```
 
-第四列不是历史趋势图，也不再拆分 R/G/B/亮度。它把前三张图的全部 RGB
-像素合并成三个普通分布：横轴为 `[0, 1]` 像素值，纵轴为像素占比，图例括号
-内为当前均值。迁移结果的曲线越接近 target，说明当前颜色分布越接近目标域。
-第三列 target 来自同一个非配对验证 batch，只作统计和视觉参考，不是该 source
-的配对真值。
+第四列不是历史趋势图，也不拆分 R/G/B/亮度。程序先把前三张图从 sRGB
+线性化并转换到 CIE XYZ，再计算 `x=X/(X+Y+Z)`、`y=Y/(X+Y+Z)`，把
+source、迁移结果和 target 的色度点叠加到同一个 CIE 1931 xy 散点图中。
+黑色附近无法稳定计算色度的像素会被过滤，每组的 `×` 标记表示色度质心。
+迁移结果点云及质心越接近 target，说明色彩统计越接近目标域。第三列 target
+来自同一个非配对验证 batch，只作统计和视觉参考，不是该 source 的配对真值。
 
 `metrics.csv` 中可看到：
 
@@ -511,7 +512,7 @@ experiments/<experiment>/test_logs/
 ├── metrics.csv                 # test_cycle_loss、test_identity_loss、test_loss
 └── figures/
     └── test_source_to_target_*.png
-                                # source、迁移结果、target、分布图四列
+                                # source、迁移结果、target、xy 色度散点图四列
 
 results/my_experiment/
 ├── source_to_target/           # 正向整图结果
@@ -525,7 +526,7 @@ results/my_experiment/
 训练和测试的非配对预览只显示正向迁移。图片中：
 
 ```text
-每一行：source | fake_target | target reference | pixel distribution
+每一行：source | fake_target | target reference | CIE xy scatter
 ```
 
 若验证 batch 大于 1，每个样本占一行。随机 target 只是非配对参考，不表示与
