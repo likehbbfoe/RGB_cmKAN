@@ -9,8 +9,22 @@ from .generator import GeneratorLayer, LightGeneratorLayer
 class CmKANLayer(torch.nn.Module):
 
     def __init__(self, in_channels, out_channels, grid_size, spline_order,
-                 residual_std, grid_range, condition_dim=0):
+                 residual_std, grid_range, condition_dim=0,
+                 output_mode='legacy', max_logit_shift=1.5):
         super(CmKANLayer, self).__init__()
+
+        self.output_mode = getattr(output_mode, 'value', output_mode)
+        if self.output_mode not in {'legacy', 'bounded_logit_residual'}:
+            raise ValueError(f'Unsupported cmKAN output mode: {self.output_mode}')
+        if self.output_mode == 'bounded_logit_residual':
+            if in_channels != out_channels:
+                raise ValueError(
+                    "bounded_logit_residual requires matching input and output "
+                    f"channels, got {in_channels} and {out_channels}"
+                )
+            if max_logit_shift <= 0:
+                raise ValueError("max_logit_shift must be greater than zero")
+        self.max_logit_shift = float(max_logit_shift)
 
         self.kan_layer = KANLayer(in_dim=in_channels,
                                   out_dim=out_channels,
@@ -54,8 +68,39 @@ class CmKANLayer(torch.nn.Module):
 
         return x.squeeze(0)
 
+    def _apply_output_mode(self, inputs, raw_output):
+        """Map raw KAN output to the configured image representation."""
+        if self.output_mode == 'legacy':
+            return raw_output
+
+        # Predict a bounded shift around the input in logit space. Zero raw
+        # output is therefore the identity mapping, while extreme KAN weights
+        # can never create values that save_image would clip into color blobs.
+        dtype_epsilon = torch.finfo(inputs.dtype).eps
+        epsilon = max(1e-4, dtype_epsilon)
+        base = torch.logit(inputs.clamp(epsilon, 1 - epsilon))
+        shift = self.max_logit_shift * torch.tanh(raw_output)
+        return torch.sigmoid(base + shift)
+
+    def reset_bounded_output_head(self):
+        """Start bounded residual translation at the identity mapping."""
+        if self.output_mode != 'bounded_logit_residual':
+            return
+        output_head = self.generator.conv_reproj.pointwise2
+        coefficient_end = int(self.kan_params_indices[1])
+
+        # Keep random spline coefficients, but zero their multiplicative
+        # weights and the residual weights. The raw KAN output is still zero,
+        # while the nonzero coefficients let the univariate-weight rows receive
+        # gradients on the first update instead of deadlocking both factors at
+        # zero forever.
+        nn.init.zeros_(output_head.weight[coefficient_end:])
+        if output_head.bias is not None:
+            nn.init.zeros_(output_head.bias[coefficient_end:])
+
     def _apply_spatial_kan(self, x, weights):
         """Apply predicted per-pixel KAN parameters to an input image."""
+        inputs = x
         B, C, H, W = x.shape
 
         # kan weights (b, h * w, kan_params_num)
@@ -69,7 +114,7 @@ class CmKANLayer(torch.nn.Module):
 
         x = x.view(B, H, W, self.kan_layer.out_dim).permute(0, 3, 1, 2)
 
-        return x
+        return self._apply_output_mode(inputs, x)
 
     def encode(self, x, condition=None):
         """Expose the contextual features that produce spatial KAN weights."""
@@ -87,9 +132,11 @@ class CmKANLayer(torch.nn.Module):
 
 class LightCmKANLayer(CmKANLayer):
     def __init__(self, in_channels, out_channels, grid_size, spline_order,
-                 residual_std, grid_range, condition_dim=0):
+                 residual_std, grid_range, condition_dim=0,
+                 output_mode='legacy', max_logit_shift=1.5):
         super(LightCmKANLayer, self).__init__(in_channels, out_channels, grid_size, spline_order,
-                 residual_std, grid_range, condition_dim=condition_dim)
+                 residual_std, grid_range, condition_dim=condition_dim,
+                 output_mode=output_mode, max_logit_shift=max_logit_shift)
         self.generator = LightGeneratorLayer(
             in_channels,
             self.kan_params_num,

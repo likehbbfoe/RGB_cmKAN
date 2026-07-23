@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 from cm_kan.ml.pipelines.unsupervised import UnsupervisedPipeline
@@ -128,6 +130,158 @@ def test_local_chroma_loss_has_finite_prediction_gradients() -> None:
 
     assert prediction.grad is not None
     assert torch.isfinite(prediction.grad).all()
+
+
+def test_local_chroma_terms_allow_uniform_global_channel_gains() -> None:
+    generator = torch.Generator().manual_seed(13)
+    source_linear = torch.rand((2, 3, 32, 32), generator=generator) * 0.30 + 0.20
+    gains = torch.tensor([1.18, 0.91, 0.82]).view(1, 3, 1, 1)
+    prediction_linear = source_linear * gains
+
+    terms = UnsupervisedPipeline._local_chroma_terms(
+        _encode_linear_srgb(prediction_linear),
+        _encode_linear_srgb(source_linear),
+        chroma_tail_fraction=0.05,
+        red_tail_fraction=0.02,
+        chroma_threshold=0.25,
+        red_threshold=math.log(1.2),
+    )
+
+    assert set(terms) == {
+        "mean",
+        "chroma_tail",
+        "red_tail",
+        "chroma_bad_fraction",
+        "red_bad_fraction",
+    }
+    assert terms["mean"].item() < 0.005
+    assert terms["chroma_tail"].item() < 0.005
+    assert terms["red_tail"].item() < 0.005
+    assert terms["chroma_bad_fraction"].item() == 0
+    assert terms["red_bad_fraction"].item() == 0
+
+
+def test_local_chroma_tail_exposes_a_small_severe_red_patch() -> None:
+    source = torch.full((1, 3, 64, 64), 0.5)
+    prediction = source.clone()
+    prediction[:, 0, 24:32, 24:32] = 0.90
+
+    terms = UnsupervisedPipeline._local_chroma_terms(
+        prediction,
+        source,
+        chroma_tail_fraction=0.05,
+        red_tail_fraction=0.02,
+        chroma_threshold=0.25,
+        red_threshold=math.log(1.2),
+    )
+
+    # A 64-pixel defect is only 1.56% of this image. The tail terms must keep
+    # that region visible instead of diluting it into the whole-image mean.
+    assert terms["chroma_tail"].item() > 3 * terms["mean"].item()
+    assert terms["red_tail"].item() > 5 * terms["mean"].item()
+    assert 0.005 < terms["chroma_bad_fraction"].item() < 0.05
+    assert 0.005 < terms["red_bad_fraction"].item() < 0.05
+
+
+def test_local_red_tail_is_one_sided_and_specific_to_red_overflow() -> None:
+    source = torch.full((1, 3, 64, 64), 0.5)
+    red_patch = source.clone()
+    blue_patch = source.clone()
+    red_patch[:, 0, 24:32, 24:32] = 0.90
+    blue_patch[:, 2, 24:32, 24:32] = 0.90
+
+    red_terms = UnsupervisedPipeline._local_chroma_terms(
+        red_patch,
+        source,
+        red_threshold=math.log(1.2),
+    )
+    blue_terms = UnsupervisedPipeline._local_chroma_terms(
+        blue_patch,
+        source,
+        red_threshold=math.log(1.2),
+    )
+
+    assert red_terms["red_tail"].item() > 0.10
+    assert red_terms["red_tail"].item() > blue_terms["red_tail"].item() + 0.10
+    assert red_terms["red_bad_fraction"].item() > 0
+    assert blue_terms["red_bad_fraction"].item() == 0
+
+
+def test_local_chroma_tail_terms_have_finite_prediction_gradients() -> None:
+    generator = torch.Generator().manual_seed(17)
+    prediction = torch.rand(
+        (2, 3, 32, 32),
+        generator=generator,
+        requires_grad=True,
+    )
+    source = torch.rand((2, 3, 32, 32), generator=generator)
+
+    terms = UnsupervisedPipeline._local_chroma_terms(prediction, source)
+    loss = terms["mean"] + terms["chroma_tail"] + terms["red_tail"]
+    loss.backward()
+
+    assert prediction.grad is not None
+    assert torch.isfinite(prediction.grad).all()
+
+
+def test_range_tail_exposes_sparse_values_that_would_be_clipped() -> None:
+    prediction = torch.full((1, 3, 64, 64), 0.5)
+    prediction[:, 0, 0, 0] = 4.0
+
+    terms = UnsupervisedPipeline._range_terms(prediction)
+
+    assert set(terms) == {"mean", "tail", "out_of_range_fraction"}
+    assert terms["mean"].item() > 0
+    assert terms["tail"].item() > 50 * terms["mean"].item()
+    assert 0 < terms["out_of_range_fraction"].item() < 0.001
+
+
+def test_range_terms_are_zero_for_bounded_predictions() -> None:
+    prediction = torch.rand((2, 3, 32, 32))
+
+    terms = UnsupervisedPipeline._range_terms(prediction)
+
+    assert terms["mean"].item() == 0
+    assert terms["tail"].item() == 0
+    assert terms["out_of_range_fraction"].item() == 0
+
+
+def _red_overshoot_pipeline() -> UnsupervisedPipeline:
+    pipeline = UnsupervisedPipeline.__new__(UnsupervisedPipeline)
+    torch.nn.Module.__init__(pipeline)
+    pipeline.reference_guided = True
+    pipeline.reference_red_overshoot_margin = 0.0
+    return pipeline
+
+
+def test_reference_red_overshoot_penalizes_only_excess_red() -> None:
+    pipeline = _red_overshoot_pipeline()
+    reference = torch.full((1, 3, 32, 32), 0.5)
+    redder = reference.clone()
+    redder[:, 0] = 0.70
+    less_red = reference.clone()
+    less_red[:, 0] = 0.35
+
+    redder_loss = pipeline._reference_red_overshoot_loss(redder, reference)
+    less_red_loss = pipeline._reference_red_overshoot_loss(less_red, reference)
+
+    assert redder_loss.item() > 0.10
+    assert less_red_loss.item() < 1e-7
+
+
+def test_reference_red_overshoot_has_finite_useful_gradients() -> None:
+    pipeline = _red_overshoot_pipeline()
+    reference = torch.full((1, 3, 32, 32), 0.5)
+    prediction = reference.clone()
+    prediction[:, 0] = 0.65
+    prediction.requires_grad_(True)
+
+    loss = pipeline._reference_red_overshoot_loss(prediction, reference)
+    loss.backward()
+
+    assert prediction.grad is not None
+    assert torch.isfinite(prediction.grad).all()
+    assert prediction.grad[:, 0].abs().sum().item() > 0
 
 
 def test_white_balance_statistics_have_finite_gradients() -> None:

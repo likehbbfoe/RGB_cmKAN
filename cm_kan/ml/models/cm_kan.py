@@ -16,6 +16,8 @@ class CmKAN(torch.nn.Module):
         residual_std,
         grid_range,
         condition_dim=0,
+        output_mode='legacy',
+        max_logit_shift=1.5,
     ):
         super(CmKAN, self).__init__()
 
@@ -32,7 +34,9 @@ class CmKAN(torch.nn.Module):
                          spline_order=spline_order,
                          residual_std=residual_std,
                          grid_range=grid_range,
-                         condition_dim=condition_dim))
+                         condition_dim=condition_dim,
+                         output_mode=output_mode,
+                         max_logit_shift=max_logit_shift))
 
         self.layers = nn.ModuleList(self.layers)
 
@@ -71,6 +75,8 @@ class LightCmKAN(torch.nn.Module):
         residual_std,
         grid_range,
         condition_dim=0,
+        output_mode='legacy',
+        max_logit_shift=1.5,
     ):
         super(LightCmKAN, self).__init__()
 
@@ -87,7 +93,9 @@ class LightCmKAN(torch.nn.Module):
                          spline_order=spline_order,
                          residual_std=residual_std,
                          grid_range=grid_range,
-                         condition_dim=condition_dim))
+                         condition_dim=condition_dim,
+                         output_mode=output_mode,
+                         max_logit_shift=max_logit_shift))
 
         self.layers = nn.ModuleList(self.layers)
 

@@ -149,20 +149,21 @@ trained from scratch:
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 \
-./scripts/train_custom_unpaired_reference.sh
+./scripts/train_custom_unpaired_reference_v3.sh
 ```
 
 The server config starts a separate experiment named
-`custom_one_to_one_reference_color_v2`, so existing v1/v6 checkpoints and CSV logs
-are left untouched. It uses a neutral-pixel white-balance estimate with a lower
-weight and light local-chroma protection; the white-balance weight ramps over five
-epochs.
+`custom_one_to_one_reference_color_v3_safe`, so existing v1/v2/v6 checkpoints and
+CSV logs are left untouched. Besides the neutral-pixel white-balance estimate, v3
+uses bounded logit-space residual output and explicit worst-region/red-overshoot
+penalties. These protect small face regions that can be hidden by an image-wide
+mean loss. The v2 config and launcher remain available for exact rollback.
 
 Use one target image as the reference for one source image or a source folder:
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference.server.yaml \
+  --config configs/custom_unpaired_reference_v3.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /absolute/path/to/source_images \
   --reference /absolute/path/to/target_reference.jpg \

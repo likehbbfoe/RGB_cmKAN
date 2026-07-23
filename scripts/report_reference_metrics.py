@@ -14,11 +14,20 @@ from typing import Iterable, Mapping
 DEFAULT_METRICS_PATH = Path(
     os.environ.get(
         "CMKAN_METRICS_PATH",
-        "experiments/custom_one_to_one_reference_color_v2/logs/metrics.csv",
+        "experiments/custom_one_to_one_reference_color_v3_safe/logs/metrics.csv",
     )
 )
 
-OUTPUT_METRICS = (
+COMPACT_OUTPUT_METRICS = (
+    ("ratio", "val_reference_style_ratio"),
+    ("local_tail", "val_fake_target_local_chroma_tail"),
+    ("red_tail", "val_fake_target_local_red_tail"),
+    ("red_bad", "val_fake_target_local_red_bad_fraction"),
+    ("red_overshoot", "val_fake_target_red_overshoot_loss"),
+    ("out_of_range", "val_fake_target_out_of_range_fraction"),
+)
+
+LEGACY_OUTPUT_METRICS = (
     ("source_ref", "val_source_reference_style_distance"),
     ("fake_ref", "val_fake_reference_style_distance"),
     ("ratio", "val_reference_style_ratio"),
@@ -41,6 +50,19 @@ OUTPUT_METRICS = (
     ("range", "val_range_loss"),
 )
 
+SAFETY_OUTPUT_METRICS = (
+    ("local_mean", "val_fake_target_local_chroma_mean"),
+    ("local_tail", "val_fake_target_local_chroma_tail"),
+    ("local_bad", "val_fake_target_local_chroma_bad_fraction"),
+    ("red_tail", "val_fake_target_local_red_tail"),
+    ("red_bad", "val_fake_target_local_red_bad_fraction"),
+    ("red_overshoot", "val_fake_target_red_overshoot_loss"),
+    ("range_tail", "val_range_tail_loss"),
+    ("out_of_range", "val_fake_target_out_of_range_fraction"),
+)
+
+ALL_OUTPUT_METRICS = LEGACY_OUTPUT_METRICS + SAFETY_OUTPUT_METRICS
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -55,6 +77,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_METRICS_PATH,
         help="Path to the Lightning CSVLogger metrics.csv file",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Print all legacy and safety metrics instead of the compact six-field report",
     )
     return parser.parse_args()
 
@@ -113,7 +140,7 @@ def summarize_metrics(path: Path) -> tuple[int, dict[str, float | None]]:
     latest_epoch = max(validation_epochs)
     summary = {
         output_name: _mean_for_epoch(rows, latest_epoch, csv_name)
-        for output_name, csv_name in OUTPUT_METRICS
+        for output_name, csv_name in ALL_OUTPUT_METRICS
     }
     return latest_epoch, summary
 
@@ -122,10 +149,14 @@ def _format_value(value: float | None) -> str:
     return "NA" if value is None else f"{value:.6f}"
 
 
-def format_summary(epoch: int, summary: Mapping[str, float | None]) -> str:
+def format_summary(
+    epoch: int,
+    summary: Mapping[str, float | None],
+    output_metrics: tuple[tuple[str, str], ...] = ALL_OUTPUT_METRICS,
+) -> str:
     values = " ".join(
         f"{output_name}={_format_value(summary.get(output_name))}"
-        for output_name, _ in OUTPUT_METRICS
+        for output_name, _ in output_metrics
     )
     return f"epoch={epoch} {values}"
 
@@ -136,7 +167,8 @@ def main() -> None:
         epoch, summary = summarize_metrics(args.metrics)
     except (FileNotFoundError, OSError, ValueError) as exc:
         raise SystemExit(f"ERROR: {exc}") from exc
-    print(format_summary(epoch, summary))
+    output_metrics = ALL_OUTPUT_METRICS if args.all else COMPACT_OUTPUT_METRICS
+    print(format_summary(epoch, summary, output_metrics))
 
 
 if __name__ == "__main__":

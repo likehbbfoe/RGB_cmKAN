@@ -1,4 +1,5 @@
 import itertools
+import math
 from collections.abc import Mapping
 
 import torch
@@ -40,7 +41,17 @@ class UnsupervisedPipeline(L.LightningModule):
         reference_white_balance_weight: float = 0.0,
         reference_white_balance_ramp_epochs: int = 0,
         reference_local_chroma_weight: float = 0.0,
+        reference_local_chroma_tail_weight: float = 0.0,
+        reference_local_chroma_tail_fraction: float = 0.05,
+        reference_local_chroma_threshold: float = 0.25,
+        reference_local_red_tail_weight: float = 0.0,
+        reference_local_red_tail_fraction: float = 0.02,
+        reference_local_red_threshold: float = 0.1823215568,
+        reference_red_overshoot_weight: float = 0.0,
+        reference_red_overshoot_margin: float = 0.02,
         range_weight: float = 0.0,
+        range_tail_weight: float = 0.0,
+        range_tail_fraction: float = 0.01,
         warmup_epochs: int = 0,
         gradient_clip_val: float = 0.0,
         discriminator_lr_scale: float = 1.0,
@@ -66,7 +77,25 @@ class UnsupervisedPipeline(L.LightningModule):
             reference_white_balance_ramp_epochs
         )
         self.reference_local_chroma_weight = reference_local_chroma_weight
+        self.reference_local_chroma_tail_weight = (
+            reference_local_chroma_tail_weight
+        )
+        self.reference_local_chroma_tail_fraction = (
+            reference_local_chroma_tail_fraction
+        )
+        self.reference_local_chroma_threshold = (
+            reference_local_chroma_threshold
+        )
+        self.reference_local_red_tail_weight = reference_local_red_tail_weight
+        self.reference_local_red_tail_fraction = (
+            reference_local_red_tail_fraction
+        )
+        self.reference_local_red_threshold = reference_local_red_threshold
+        self.reference_red_overshoot_weight = reference_red_overshoot_weight
+        self.reference_red_overshoot_margin = reference_red_overshoot_margin
         self.range_weight = range_weight
+        self.range_tail_weight = range_tail_weight
+        self.range_tail_fraction = range_tail_fraction
         self.warmup_epochs = warmup_epochs
         self.gradient_clip_val = gradient_clip_val
         self.discriminator_lr_scale = discriminator_lr_scale
@@ -284,9 +313,37 @@ class UnsupervisedPipeline(L.LightningModule):
         )
 
     @staticmethod
-    def _range_loss(predictions):
-        """Penalize values that would be clipped when an image is saved."""
-        return F.relu(-predictions).mean() + F.relu(predictions - 1).mean()
+    def _top_fraction_mean(values, fraction):
+        """Return a per-image CVaR over the largest spatial values."""
+        if not 0 < fraction <= 1:
+            raise ValueError("tail fraction must be in the interval (0, 1]")
+        flattened = values.reshape(values.shape[0], -1)
+        count = max(1, math.ceil(flattened.shape[1] * fraction))
+        return flattened.topk(count, dim=1).values.mean(dim=1).mean()
+
+    @classmethod
+    def _range_terms(cls, predictions, tail_fraction=0.01):
+        """Measure both average and sparse values clipped during image saving."""
+        channel_overshoot = torch.maximum(
+            F.relu(-predictions),
+            F.relu(predictions - 1),
+        )
+        pixel_overshoot = channel_overshoot.amax(dim=1, keepdim=True)
+        return {
+            'mean': channel_overshoot.mean(),
+            'tail': cls._top_fraction_mean(pixel_overshoot, tail_fraction),
+            'out_of_range_fraction': (
+                ((predictions < 0) | (predictions > 1))
+                .any(dim=1, keepdim=True)
+                .float()
+                .mean()
+            ),
+        }
+
+    @classmethod
+    def _range_loss(cls, predictions):
+        """Backward-compatible mean range loss."""
+        return cls._range_terms(predictions)['mean']
 
     @classmethod
     def _exposure_loss(cls, predictions, inputs):
@@ -318,8 +375,17 @@ class UnsupervisedPipeline(L.LightningModule):
         )
 
     @classmethod
-    def _local_chroma_loss(cls, predictions, inputs, eps=1e-3):
-        """Preserve local relative color while allowing global channel gains."""
+    def _local_chroma_terms(
+        cls,
+        predictions,
+        inputs,
+        chroma_tail_fraction=0.05,
+        red_tail_fraction=0.02,
+        chroma_threshold=0.25,
+        red_threshold=0.1823215568,
+        eps=1e-3,
+    ):
+        """Measure local color drift after removing a robust global color gain."""
         prediction_rgb = cls._linearize_srgb(predictions.float())
         input_rgb = cls._linearize_srgb(inputs.float())
 
@@ -340,12 +406,15 @@ class UnsupervisedPipeline(L.LightningModule):
             * torch.sigmoid((0.98 - input_luminance) / 0.02)
         ).unsqueeze(1).detach()
         reduce_dims = (2, 3)
-        global_delta = (
+        initial_global_delta = (
             (weights * chroma_delta).sum(dim=reduce_dims, keepdim=True)
             / weights.sum(dim=reduce_dims, keepdim=True).clamp_min(1e-6)
         )
-        local_residual = chroma_delta - global_delta
-        per_pixel_loss = cls._charbonnier(local_residual).mean(
+        # Keep the original whole-image mean term exactly compatible with v2.
+        # A second robust center is used only by the new worst-region guards so
+        # a small red patch cannot drag the center toward itself.
+        mean_local_residual = chroma_delta - initial_global_delta
+        per_pixel_loss = cls._charbonnier(mean_local_residual).mean(
             dim=1,
             keepdim=True,
         )
@@ -353,7 +422,84 @@ class UnsupervisedPipeline(L.LightningModule):
             (weights * per_pixel_loss).sum(dim=reduce_dims)
             / weights.sum(dim=reduce_dims).clamp_min(1e-6)
         )
-        return per_image_loss.mean()
+        squared_distance = (
+            (chroma_delta - initial_global_delta.detach())
+            .square()
+            .sum(dim=1, keepdim=True)
+        )
+        robust_weights = (
+            1 / (1 + squared_distance / (0.25 * 0.25))
+        ).detach()
+        center_weights = weights * robust_weights
+        global_delta = (
+            (center_weights * chroma_delta).sum(
+                dim=reduce_dims,
+                keepdim=True,
+            )
+            / center_weights.sum(
+                dim=reduce_dims,
+                keepdim=True,
+            ).clamp_min(1e-6)
+        )
+        local_residual = chroma_delta - global_delta
+        residual_magnitude = torch.sqrt(
+            local_residual.square().sum(dim=1, keepdim=True) + 1e-8
+        )
+        softness = 0.03
+        chroma_excess = softness * F.softplus(
+            (residual_magnitude - chroma_threshold) / softness
+        )
+        red_excess = softness * F.softplus(
+            (local_residual[:, :1] - red_threshold) / softness
+        )
+        weight_sum = weights.sum(dim=reduce_dims).clamp_min(1e-6)
+        return {
+            'mean': per_image_loss.mean(),
+            'chroma_tail': cls._top_fraction_mean(
+                weights * chroma_excess,
+                chroma_tail_fraction,
+            ),
+            'red_tail': cls._top_fraction_mean(
+                weights * red_excess,
+                red_tail_fraction,
+            ),
+            'chroma_bad_fraction': (
+                (
+                    weights
+                    * (residual_magnitude > chroma_threshold).float()
+                ).sum(dim=reduce_dims)
+                / weight_sum
+            ).mean(),
+            'red_bad_fraction': (
+                (
+                    weights
+                    * (local_residual[:, :1] > red_threshold).float()
+                ).sum(dim=reduce_dims)
+                / weight_sum
+            ).mean(),
+        }
+
+    @classmethod
+    def _local_chroma_loss(cls, predictions, inputs, eps=1e-3):
+        """Backward-compatible mean local chroma loss."""
+        return cls._local_chroma_terms(
+            predictions,
+            inputs,
+            eps=eps,
+        )['mean']
+
+    def _reference_red_overshoot_loss(self, predictions, reference):
+        """Penalize only a global R/G cast that is redder than its reference."""
+        if not self.reference_guided:
+            return predictions.new_zeros(())
+        red_green_delta = (
+            self._white_balance_statistics(predictions)
+            - self._white_balance_statistics(reference).detach()
+        )[:, 0]
+        excess = F.relu(
+            red_green_delta - self.reference_red_overshoot_margin
+        )
+        return self._charbonnier(excess).mean()
 
     @classmethod
     def _reflectance(cls, images, kernel_size=31, eps=1e-4):
@@ -511,6 +657,17 @@ class UnsupervisedPipeline(L.LightningModule):
                     if style_affine is not None:
                         nn.init.zeros_(style_affine[-1].weight)
                         nn.init.zeros_(style_affine[-1].bias)
+
+            # The bounded residual mode is intentionally initialized as an
+            # identity transform after the generic Kaiming pass above.
+            for module in self.model.modules():
+                reset_output_head = getattr(
+                    module,
+                    "reset_bounded_output_head",
+                    None,
+                )
+                if reset_output_head is not None:
+                    reset_output_head()
 
             if self.pretrained:
                 pipeline = UnsupervisedPipeline.load_from_checkpoint(
@@ -687,19 +844,79 @@ class UnsupervisedPipeline(L.LightningModule):
         effectiveReferenceWhiteBalanceWeight = (
             self._effective_reference_white_balance_weight()
         )
-        if self.reference_local_chroma_weight > 0:
-            referenceLocalChromaA = self._local_chroma_loss(fakeA, imgB)
-            referenceLocalChromaB = self._local_chroma_loss(fakeB, imgA)
+        useLocalChromaGuard = any(
+            weight > 0
+            for weight in (
+                self.reference_local_chroma_weight,
+                self.reference_local_chroma_tail_weight,
+                self.reference_local_red_tail_weight,
+            )
+        )
+        if useLocalChromaGuard:
+            localTermsA = self._local_chroma_terms(
+                fakeA,
+                imgB,
+                chroma_tail_fraction=(
+                    self.reference_local_chroma_tail_fraction
+                ),
+                red_tail_fraction=self.reference_local_red_tail_fraction,
+                chroma_threshold=self.reference_local_chroma_threshold,
+                red_threshold=self.reference_local_red_threshold,
+            )
+            localTermsB = self._local_chroma_terms(
+                fakeB,
+                imgA,
+                chroma_tail_fraction=(
+                    self.reference_local_chroma_tail_fraction
+                ),
+                red_tail_fraction=self.reference_local_red_tail_fraction,
+                chroma_threshold=self.reference_local_chroma_threshold,
+                red_threshold=self.reference_local_red_threshold,
+            )
         else:
-            referenceLocalChromaA = fakeA.new_zeros(())
-            referenceLocalChromaB = fakeB.new_zeros(())
+            zero = fakeA.new_zeros(())
+            localTermsA = localTermsB = {
+                'mean': zero,
+                'chroma_tail': zero,
+                'red_tail': zero,
+                'chroma_bad_fraction': zero,
+                'red_bad_fraction': zero,
+            }
+        referenceLocalChromaA = localTermsA['mean']
+        referenceLocalChromaB = localTermsB['mean']
         referenceLocalChromaLoss = (
             referenceLocalChromaA + referenceLocalChromaB
         )
+        referenceLocalChromaTailLoss = (
+            localTermsA['chroma_tail'] + localTermsB['chroma_tail']
+        )
+        referenceLocalRedTailLoss = (
+            localTermsA['red_tail'] + localTermsB['red_tail']
+        )
+        referenceRedOvershootA = self._reference_red_overshoot_loss(
+            fakeA,
+            imgA,
+        )
+        referenceRedOvershootB = self._reference_red_overshoot_loss(
+            fakeB,
+            imgB,
+        )
+        referenceRedOvershootLoss = (
+            referenceRedOvershootA + referenceRedOvershootB
+        )
 
-        rangeA = self._range_loss(fakeA)
-        rangeB = self._range_loss(fakeB)
+        rangeTermsA = self._range_terms(
+            fakeA,
+            tail_fraction=self.range_tail_fraction,
+        )
+        rangeTermsB = self._range_terms(
+            fakeB,
+            tail_fraction=self.range_tail_fraction,
+        )
+        rangeA = rangeTermsA['mean']
+        rangeB = rangeTermsB['mean']
         rangeLoss = rangeA + rangeB
+        rangeTailLoss = rangeTermsA['tail'] + rangeTermsB['tail']
         
         # gather all losses
         adversarialLoss = adversarialA + adversarialB
@@ -715,7 +932,20 @@ class UnsupervisedPipeline(L.LightningModule):
             + self.reference_style_weight * referenceStyleLoss
             + effectiveReferenceWhiteBalanceWeight * referenceWhiteBalanceLoss
             + self.reference_local_chroma_weight * referenceLocalChromaLoss
+            + (
+                self.reference_local_chroma_tail_weight
+                * referenceLocalChromaTailLoss
+            )
+            + (
+                self.reference_local_red_tail_weight
+                * referenceLocalRedTailLoss
+            )
+            + (
+                self.reference_red_overshoot_weight
+                * referenceRedOvershootLoss
+            )
             + self.range_weight * rangeLoss
+            + self.range_tail_weight * rangeTailLoss
         )
 
         batch_size = imgA.shape[0]
@@ -762,6 +992,36 @@ class UnsupervisedPipeline(L.LightningModule):
             referenceLocalChromaB,
             batch_size,
         )
+        self._log_loss(
+            'gen_reference_local_chroma_tail_a_loss',
+            localTermsA['chroma_tail'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_local_chroma_tail_b_loss',
+            localTermsB['chroma_tail'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_local_red_tail_a_loss',
+            localTermsA['red_tail'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_local_red_tail_b_loss',
+            localTermsB['red_tail'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_red_overshoot_a_loss',
+            referenceRedOvershootA,
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_red_overshoot_b_loss',
+            referenceRedOvershootB,
+            batch_size,
+        )
         (
             redGreenDeltaB,
             blueGreenDeltaB,
@@ -803,6 +1063,21 @@ class UnsupervisedPipeline(L.LightningModule):
         )
         self._log_loss('gen_range_a_loss', rangeA, batch_size)
         self._log_loss('gen_range_b_loss', rangeB, batch_size)
+        self._log_loss(
+            'gen_range_tail_a_loss',
+            rangeTermsA['tail'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_range_tail_b_loss',
+            rangeTermsB['tail'],
+            batch_size,
+        )
+        self._log_loss(
+            'fake_b_out_of_range_fraction',
+            rangeTermsB['out_of_range_fraction'],
+            batch_size,
+        )
         self._log_loss(
             'fake_a_luminance', self._luminance_mean(fakeA), batch_size
         )
@@ -1008,16 +1283,75 @@ class UnsupervisedPipeline(L.LightningModule):
         effective_reference_white_balance_weight = (
             self._effective_reference_white_balance_weight()
         )
-        if self.reference_local_chroma_weight > 0:
-            reference_local_chroma_loss = (
-                self._local_chroma_loss(fake_source, target)
-                + self._local_chroma_loss(fake_target, source)
+        use_local_chroma_guard = any(
+            weight > 0
+            for weight in (
+                self.reference_local_chroma_weight,
+                self.reference_local_chroma_tail_weight,
+                self.reference_local_red_tail_weight,
+            )
+        )
+        if use_local_chroma_guard:
+            fake_source_local_terms = self._local_chroma_terms(
+                fake_source,
+                target,
+                chroma_tail_fraction=(
+                    self.reference_local_chroma_tail_fraction
+                ),
+                red_tail_fraction=self.reference_local_red_tail_fraction,
+                chroma_threshold=self.reference_local_chroma_threshold,
+                red_threshold=self.reference_local_red_threshold,
+            )
+            fake_target_local_terms = self._local_chroma_terms(
+                fake_target,
+                source,
+                chroma_tail_fraction=(
+                    self.reference_local_chroma_tail_fraction
+                ),
+                red_tail_fraction=self.reference_local_red_tail_fraction,
+                chroma_threshold=self.reference_local_chroma_threshold,
+                red_threshold=self.reference_local_red_threshold,
             )
         else:
-            reference_local_chroma_loss = fake_source.new_zeros(())
+            zero = fake_source.new_zeros(())
+            fake_source_local_terms = fake_target_local_terms = {
+                'mean': zero,
+                'chroma_tail': zero,
+                'red_tail': zero,
+                'chroma_bad_fraction': zero,
+                'red_bad_fraction': zero,
+            }
+        reference_local_chroma_loss = (
+            fake_source_local_terms['mean']
+            + fake_target_local_terms['mean']
+        )
+        reference_local_chroma_tail_loss = (
+            fake_source_local_terms['chroma_tail']
+            + fake_target_local_terms['chroma_tail']
+        )
+        reference_local_red_tail_loss = (
+            fake_source_local_terms['red_tail']
+            + fake_target_local_terms['red_tail']
+        )
+        reference_red_overshoot_loss = (
+            self._reference_red_overshoot_loss(fake_source, source)
+            + self._reference_red_overshoot_loss(fake_target, target)
+        )
+        fake_source_range_terms = self._range_terms(
+            fake_source,
+            tail_fraction=self.range_tail_fraction,
+        )
+        fake_target_range_terms = self._range_terms(
+            fake_target,
+            tail_fraction=self.range_tail_fraction,
+        )
         range_loss = (
-            self._range_loss(fake_source)
-            + self._range_loss(fake_target)
+            fake_source_range_terms['mean']
+            + fake_target_range_terms['mean']
+        )
+        range_tail_loss = (
+            fake_source_range_terms['tail']
+            + fake_target_range_terms['tail']
         )
         loss = (
             self.adversarial_weight * adversarial_loss
@@ -1034,7 +1368,20 @@ class UnsupervisedPipeline(L.LightningModule):
                 * reference_white_balance_loss
             )
             + self.reference_local_chroma_weight * reference_local_chroma_loss
+            + (
+                self.reference_local_chroma_tail_weight
+                * reference_local_chroma_tail_loss
+            )
+            + (
+                self.reference_local_red_tail_weight
+                * reference_local_red_tail_loss
+            )
+            + (
+                self.reference_red_overshoot_weight
+                * reference_red_overshoot_loss
+            )
             + self.range_weight * range_loss
+            + self.range_tail_weight * range_tail_loss
         )
         self.log(f'{stage}_cycle_loss', cycle_loss, prog_bar=False, logger=True)
         self.log(f'{stage}_identity_loss', identity_loss, prog_bar=False, logger=True)
@@ -1077,6 +1424,24 @@ class UnsupervisedPipeline(L.LightningModule):
         self.log(
             f'{stage}_reference_local_chroma_loss',
             reference_local_chroma_loss,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_reference_local_chroma_tail_loss',
+            reference_local_chroma_tail_loss,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_reference_local_red_tail_loss',
+            reference_local_red_tail_loss,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_reference_red_overshoot_loss',
+            reference_red_overshoot_loss,
             prog_bar=False,
             logger=True,
         )
@@ -1191,7 +1556,55 @@ class UnsupervisedPipeline(L.LightningModule):
                 prog_bar=False,
                 logger=True,
             )
+            self.log(
+                f'{stage}_fake_target_local_chroma_mean',
+                fake_target_local_terms['mean'],
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_fake_target_local_chroma_tail',
+                fake_target_local_terms['chroma_tail'],
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_fake_target_local_red_tail',
+                fake_target_local_terms['red_tail'],
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_fake_target_local_chroma_bad_fraction',
+                fake_target_local_terms['chroma_bad_fraction'],
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_fake_target_local_red_bad_fraction',
+                fake_target_local_terms['red_bad_fraction'],
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_fake_target_red_overshoot_loss',
+                self._reference_red_overshoot_loss(fake_target, target),
+                prog_bar=False,
+                logger=True,
+            )
         self.log(f'{stage}_range_loss', range_loss, prog_bar=False, logger=True)
+        self.log(
+            f'{stage}_range_tail_loss',
+            range_tail_loss,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_fake_target_out_of_range_fraction',
+            fake_target_range_terms['out_of_range_fraction'],
+            prog_bar=False,
+            logger=True,
+        )
         self.log(
             f'{stage}_fake_source_luminance',
             self._luminance_mean(fake_source),

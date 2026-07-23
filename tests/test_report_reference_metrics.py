@@ -1,7 +1,11 @@
 import csv
 from pathlib import Path
 
-from scripts.report_reference_metrics import format_summary, summarize_metrics
+from scripts.report_reference_metrics import (
+    COMPACT_OUTPUT_METRICS,
+    format_summary,
+    summarize_metrics,
+)
 
 
 def _write_metrics(path: Path) -> None:
@@ -27,6 +31,11 @@ def _write_metrics(path: Path) -> None:
         "val_fake_target_luminance",
         "val_real_target_luminance",
         "val_range_loss",
+        "val_fake_target_local_chroma_tail",
+        "val_fake_target_local_red_tail",
+        "val_fake_target_local_red_bad_fraction",
+        "val_fake_target_red_overshoot_loss",
+        "val_fake_target_out_of_range_fraction",
     ]
     rows = [
         {
@@ -57,6 +66,11 @@ def _write_metrics(path: Path) -> None:
             "val_fake_target_luminance": "0.47",
             "val_real_target_luminance": "0.49",
             "val_range_loss": "0.001",
+            "val_fake_target_local_chroma_tail": "0.031",
+            "val_fake_target_local_red_tail": "0.012",
+            "val_fake_target_local_red_bad_fraction": "0.004",
+            "val_fake_target_red_overshoot_loss": "0.002",
+            "val_fake_target_out_of_range_fraction": "0.0",
         },
     ]
     with path.open("w", newline="", encoding="utf-8") as metrics_file:
@@ -91,6 +105,15 @@ def test_summarize_metrics_uses_latest_validation_epoch(tmp_path: Path) -> None:
     assert summary["target_luma"] == 0.49
     assert format_summary(epoch, summary).startswith(
         "epoch=136 source_ref=0.030000 fake_ref=0.027000 ratio=0.900000"
+    )
+    assert format_summary(
+        epoch,
+        summary,
+        COMPACT_OUTPUT_METRICS,
+    ) == (
+        "epoch=136 ratio=0.900000 local_tail=0.031000 "
+        "red_tail=0.012000 red_bad=0.004000 red_overshoot=0.002000 "
+        "out_of_range=0.000000"
     )
 
 

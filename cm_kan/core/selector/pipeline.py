@@ -52,7 +52,33 @@ class PipelineSelector:
                     reference_local_chroma_weight=(
                         config.pipeline.params.reference_local_chroma_weight
                     ),
+                    reference_local_chroma_tail_weight=(
+                        config.pipeline.params.reference_local_chroma_tail_weight
+                    ),
+                    reference_local_chroma_tail_fraction=(
+                        config.pipeline.params.reference_local_chroma_tail_fraction
+                    ),
+                    reference_local_chroma_threshold=(
+                        config.pipeline.params.reference_local_chroma_threshold
+                    ),
+                    reference_local_red_tail_weight=(
+                        config.pipeline.params.reference_local_red_tail_weight
+                    ),
+                    reference_local_red_tail_fraction=(
+                        config.pipeline.params.reference_local_red_tail_fraction
+                    ),
+                    reference_local_red_threshold=(
+                        config.pipeline.params.reference_local_red_threshold
+                    ),
+                    reference_red_overshoot_weight=(
+                        config.pipeline.params.reference_red_overshoot_weight
+                    ),
+                    reference_red_overshoot_margin=(
+                        config.pipeline.params.reference_red_overshoot_margin
+                    ),
                     range_weight=config.pipeline.params.range_weight,
+                    range_tail_weight=config.pipeline.params.range_tail_weight,
+                    range_tail_fraction=config.pipeline.params.range_tail_fraction,
                     warmup_epochs=config.pipeline.params.warmup_epochs,
                     gradient_clip_val=config.pipeline.params.gradient_clip_val,
                     discriminator_lr_scale=config.pipeline.params.discriminator_lr_scale,

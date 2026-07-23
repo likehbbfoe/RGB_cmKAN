@@ -16,6 +16,8 @@ class CycleCmKAN(torch.nn.Module):
         residual_std,
         grid_range,
         condition_dim=0,
+        output_mode='legacy',
+        max_logit_shift=1.5,
     ):
         super(CycleCmKAN, self).__init__()
 
@@ -29,6 +31,8 @@ class CycleCmKAN(torch.nn.Module):
             residual_std=residual_std,
             grid_range=grid_range,
             condition_dim=condition_dim,
+            output_mode=output_mode,
+            max_logit_shift=max_logit_shift,
         )
         self.gen_ba = CmKAN(
             in_dims=out_dims,
@@ -38,6 +42,8 @@ class CycleCmKAN(torch.nn.Module):
             residual_std=residual_std,
             grid_range=grid_range,
             condition_dim=condition_dim,
+            output_mode=output_mode,
+            max_logit_shift=max_logit_shift,
         )
         self.dis_a = PatchDiscriminator(in_dim=in_dims[0])
         self.dis_b = PatchDiscriminator(in_dim=out_dims[0])
@@ -56,6 +62,8 @@ class ReferenceCycleCmKAN(CycleCmKAN):
         spline_order,
         residual_std,
         grid_range,
+        output_mode='legacy',
+        max_logit_shift=1.5,
     ):
         super().__init__(
             in_dims=in_dims,
@@ -65,6 +73,8 @@ class ReferenceCycleCmKAN(CycleCmKAN):
             residual_std=residual_std,
             grid_range=grid_range,
             condition_dim=ReferenceStyleEncoder.output_dim,
+            output_mode=output_mode,
+            max_logit_shift=max_logit_shift,
         )
         self.style_encoder = ReferenceStyleEncoder()
 

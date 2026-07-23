@@ -1,6 +1,6 @@
 # cmKAN 自定义非配对训练与推理指南
 
-_从数据准备、CycleCmKAN 训练到参考图引导推理与服务器排错的一站式说明 · 最后核对：2026-07-22_
+_从数据准备、CycleCmKAN 训练到参考图引导推理与服务器排错的一站式说明 · 最后核对：2026-07-23_
 
 ---
 
@@ -442,6 +442,26 @@ fake 与原输入之间的逐像素 log-chroma 变化中减去整张图的平均
 显示亮度已经对齐、冷暖平均偏差接近零，继续使用过强的整图白平衡约束反而容易过校色。
 `reference_style_weight: 5.0` 保持不变，PatchNCE 与 reflectance loss 继续保护结构细节。
 
+### v3：局部红斑与红通道过冲保护
+
+v2 的 `reference_local_chroma_weight` 是整图平均值。脸部只占少量像素时，即使局部已经
+严重变红，平均 loss 仍可能很小；旧生成器的逐像素输出也没有硬边界，保存图片时才截断，
+可能把少量越界像素直接截成高饱和红色。v3 针对这两个问题增加四层保护：
+
+- `output_mode: bounded_logit_residual`：在输入图像的 logit 空间学习有限幅度残差，
+  `max_logit_shift: 1.5` 限制单次颜色变化，并保证生成结果始终处于有效像素范围。
+- `reference_local_chroma_tail_weight`：额外约束局部颜色变化最严重的一小部分像素，
+  防止脸部红斑被大面积正常背景稀释。
+- `reference_local_red_tail_weight` 与 `reference_red_overshoot_weight`：分别约束局部
+  `log(R/G)` 正向异常，以及生成图比对应 target 更红的整图过冲；target 本身合理的
+  暖色不会被强行去掉。
+- `range_tail_weight`：保留最坏区域的范围诊断；与有界输出共同防止极少量异常像素
+  被整图均值掩盖。
+
+v3 同时把 `reference_style_weight` 降到 `3.0`、`identity_weight` 提到 `2.0`。
+有界残差输出头会在通用权重初始化之后再次清零，因此模型从恒等映射开始；配置使用
+`warmup_epochs: 0`，直接进入完整训练，避免恒等映射再做无效的 identity warm-up。
+
 ### 必须从头训练新 checkpoint
 
 参考图模式在两个生成器中新增了条件调制层，模型类型也从 `cycle_cm_kan` 变为
@@ -459,7 +479,7 @@ resume: false
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID \
 CUDA_VISIBLE_DEVICES=7 \
-./scripts/train_custom_unpaired_reference.sh
+./scripts/train_custom_unpaired_reference_v3.sh
 ```
 
 脚本默认数据根目录是 `/home/share/y50063074/data`。若服务器目录不同，再把实际
@@ -469,26 +489,29 @@ CUDA_VISIBLE_DEVICES=7 \
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py train \
-  --config configs/custom_unpaired_reference.server.yaml \
+  --config configs/custom_unpaired_reference_v3.server.yaml \
   --data-root /absolute/path/to/my_dataset \
   --source-domain source \
   --target-domain target
 ```
 
-### 新版使用独立实验从第 0 轮训练
+### v3 使用独立实验从第 0 轮训练
 
 当前服务器配置使用独立实验名：
 
 ```yaml
-experiment: custom_one_to_one_reference_color_v2
+experiment: custom_one_to_one_reference_color_v3_safe
 resume: false
 ```
 
-因此它不会覆盖原来的 v1、`custom_unpaired_reference_v6`、既有 checkpoint 或旧
-`metrics.csv`。v2 从第 0 轮学习严格一对一参考、低饱和中性白平衡和局部色度保护。
-白平衡权重在最初 5 轮按 `0.2、0.4、0.6、0.8、1.0` 增长，之后保持 `1.0`；调度使用
-绝对 epoch，所以中途断点续训不会重新开始缓升。建议先比较第 5、20、50 轮的同一组六组
-预览与统计，不必等满 200 轮才判断。配置每轮保存 `last.ckpt` 与当前最佳 checkpoint。
+因此它不会覆盖原来的 v1、v2、`custom_unpaired_reference_v6`、既有 checkpoint 或旧
+`metrics.csv`。v3 必须从第 0 轮训练，不要续接第 171 轮的 v2 checkpoint。服务器配置
+默认 `batch_size: 8`、`epochs: 50`，每轮保存 `last.ckpt` 与当前最佳 checkpoint。
+建议先检查第 5、10、20 轮的固定六组预览：只要人脸结构或局部颜色明显异常就停止，
+不必通宵等到第 50 轮。确认三个检查点都稳定后，再决定是否增加总轮数。
+
+旧的 `configs/custom_unpaired_reference.server.yaml` 和
+`scripts/train_custom_unpaired_reference.sh` 仍完整保留，对应 v2，仅用于复现和回退。
 
 ### 用一张参考图推理
 
@@ -496,7 +519,7 @@ resume: false
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference.server.yaml \
+  --config configs/custom_unpaired_reference_v3.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /absolute/path/to/source_images \
   --reference /absolute/path/to/target_reference.jpg \
@@ -514,8 +537,12 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 \
+CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v3.server.yaml \
 ./scripts/predict_reference_guided.sh /absolute/path/to/target_reference.jpg
 ```
+
+该推理封装脚本为了兼容旧 checkpoint，默认仍指向 v2 配置；使用 v3 checkpoint 时
+必须像上面一样指定 `CMKAN_CONFIG_PATH`，或者使用前面的完整 `main.py predict` 命令。
 
 ### 同一 source 更换参考图的对照检验
 
@@ -524,7 +551,7 @@ CUDA_VISIBLE_DEVICES=7 \
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference.server.yaml \
+  --config configs/custom_unpaired_reference_v3.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/warm_target.jpg \
@@ -532,7 +559,7 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --batch_size 1
 
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference.server.yaml \
+  --config configs/custom_unpaired_reference_v3.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/cool_target.jpg \
@@ -615,6 +642,9 @@ python main.py train \
 | `reference_white_balance_weight` | 生成结果匹配参考图中性/中间调区域白平衡的约束权重 |
 | `reference_white_balance_ramp_epochs` | 从第 0 轮起把白平衡权重线性升到设定值所用轮数 |
 | `reference_local_chroma_weight` | 保留全局通道增益后，限制局部相对色度漂移的权重 |
+| `reference_local_chroma_tail_weight` | 重点惩罚最严重局部色度漂移的权重 |
+| `reference_local_red_tail_weight` | 重点惩罚局部 `log(R/G)` 正向异常的权重 |
+| `reference_red_overshoot_weight` | 只惩罚生成图比对应 target 更红的整图过冲权重 |
 | `exposure_weight` | 同图转换前后亮度和对比度保持权重 |
 | `chroma_weight` | 同图转换前后的强度无关色度保持权重，抑制肤色偏移 |
 | `reflectance_weight` | 去除平滑光照后的局部反射一致性权重 |
@@ -622,6 +652,9 @@ python main.py train \
 | `patch_nce_num_patches` | 每层、每张图抽取的对比 patch 数量 |
 | `patch_nce_temperature` | PatchNCE softmax 温度 |
 | `range_weight` | 超出 `[0, 1]` 的输出范围惩罚 |
+| `range_tail_weight` | 最严重少量越界像素的额外范围惩罚 |
+| `model.params.output_mode` | v3 使用 `bounded_logit_residual` 保证有效输出范围 |
+| `model.params.max_logit_shift` | v3 对 logit 空间颜色变化幅度的上限 |
 | `warmup_epochs` | 判别器启动前的生成器 identity warm-up 轮数 |
 | `gradient_clip_val` | 生成器和判别器梯度裁剪阈值 |
 | `discriminator_lr_scale` | 判别器相对生成器的学习率比例 |
@@ -703,6 +736,14 @@ source/target 仍来自数据加载器给出的一对一样本，不会跨组重
 - `val_reference_style_ratio`（参考图模式；小于 `1` 表示生成图比原 source 更靠近参考图）
 - `val_reference_white_balance_loss`（生成图与两方向参考图的白平衡差异，越小越好）
 - `val_reference_local_chroma_loss`（扣除全局通道增益后的局部色度变化，越小越稳定）
+- `val_fake_target_local_chroma_mean`、`val_fake_target_local_chroma_tail`
+  （正向迁移的局部色度平均值与最坏区域值）
+- `val_fake_target_local_chroma_bad_fraction`（正向迁移中局部色度异常像素占比）
+- `val_fake_target_local_red_tail`、`val_fake_target_local_red_bad_fraction`
+  （正向迁移最坏局部红通道异常及异常像素占比）
+- `val_fake_target_red_overshoot_loss`（生成图比对应 target 更红的整图过冲）
+- `val_range_tail_loss`、`val_fake_target_out_of_range_fraction`
+  （最坏区域范围损失与正向输出越界像素占比）
 - `val_fake_target_red_green_delta`、`val_fake_target_blue_green_delta`
 - `val_fake_target_warm_bias`（正值表示 fake target 比参考 target 偏暖，负值表示偏冷）
 - `val_fake_target_warm_abs`（逐样本冷暖绝对偏差，避免正负抵消）
@@ -724,14 +765,30 @@ python scripts/report_reference_metrics.py
 
 脚本只读取 `metrics.csv`，不读取图片、文件名或数据路径，并输出一行可以直接
 复制的汇总结果。默认路径是
-`experiments/custom_one_to_one_reference_color_v2/logs/metrics.csv`；如果实验目录不同，
+`experiments/custom_one_to_one_reference_color_v3_safe/logs/metrics.csv`；如果实验目录不同，
 可以把实际 CSV 路径作为第一个参数：
 
 ```bash
 python scripts/report_reference_metrics.py /path/to/metrics.csv
 ```
 
-报告中的新增字段含义如下：
+默认只输出下面 6 个字段，之后把这一行发过来即可，不再需要手工复制全部 CSV 指标：
+
+- `ratio`：生成图与参考图的风格距离相对迁移前 source 的比例，小于 `1` 才表示整体
+  在向参考风格靠近。
+- `local_tail`：局部色度变化最严重区域的误差，越小越好。
+- `red_tail`：局部 `log(R/G)` 正向异常最严重区域的误差，专门观察局部变红。
+- `red_bad`：局部红色异常像素占比，越接近 `0` 越好。
+- `red_overshoot`：生成图比对应 target 更红的整图过冲，越接近 `0` 越好。
+- `out_of_range`：输出越界像素占比；v3 有界输出下应保持 `0`。
+
+需要排查其他历史指标时再运行完整模式：
+
+```bash
+python scripts/report_reference_metrics.py --all
+```
+
+完整报告中的旧字段含义如下：
 
 - `wb_loss`：两方向白平衡误差，越小越好。
 - `local_chroma`：扣除允许的全局通道增益后，局部相对颜色变化的两方向误差。
@@ -748,8 +805,8 @@ python scripts/report_reference_metrics.py /path/to/metrics.csv
   模型是否真正缩小了色温差。
 - `source_tint`、`source_tint_abs`：迁移前绿—洋红方向的对应基线。
 
-如果把旧 v1/v6 CSV 路径传给脚本，因为旧日志没有这些列，脚本会正常输出
-`wb_loss=NA` 等字段；新版完成至少一次验证后就会出现数值。
+如果把旧 v1/v2/v6 CSV 路径传给脚本，因为旧日志没有 v3 安全指标，默认报告会将
+相应字段显示为 `NA`；v3 完成至少一次验证后就会出现数值。
 
 断点续训时，将配置改为：
 

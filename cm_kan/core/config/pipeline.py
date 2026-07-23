@@ -51,7 +51,28 @@ class UnsupervisedPipelineParams(DefaultPipelineParams):
     reference_white_balance_weight: float = Field(default=0.0, ge=0)
     reference_white_balance_ramp_epochs: int = Field(default=0, ge=0)
     reference_local_chroma_weight: float = Field(default=0.0, ge=0)
+    reference_local_chroma_tail_weight: float = Field(default=0.0, ge=0)
+    reference_local_chroma_tail_fraction: float = Field(
+        default=0.05,
+        gt=0,
+        le=1,
+    )
+    reference_local_chroma_threshold: float = Field(default=0.25, ge=0)
+    reference_local_red_tail_weight: float = Field(default=0.0, ge=0)
+    reference_local_red_tail_fraction: float = Field(
+        default=0.02,
+        gt=0,
+        le=1,
+    )
+    reference_local_red_threshold: float = Field(
+        default=0.1823215568,
+        ge=0,
+    )
+    reference_red_overshoot_weight: float = Field(default=0.0, ge=0)
+    reference_red_overshoot_margin: float = Field(default=0.02, ge=0)
     range_weight: float = Field(default=0.0, ge=0)
+    range_tail_weight: float = Field(default=0.0, ge=0)
+    range_tail_fraction: float = Field(default=0.01, gt=0, le=1)
     warmup_epochs: int = Field(default=0, ge=0)
     gradient_clip_val: float = Field(default=0.0, ge=0)
     discriminator_lr_scale: float = Field(default=1.0, gt=0)
