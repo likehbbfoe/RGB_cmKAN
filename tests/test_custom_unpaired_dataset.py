@@ -298,6 +298,138 @@ def test_weak_aligned_fallback_uses_natural_numeric_order(
     }
 
 
+def test_one_to_one_prefers_complete_relative_stem_matches(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    _write_image(source_root / "scene" / "first.png", 10)
+    _write_image(source_root / "scene" / "second.png", 20)
+    _write_image(target_root / "scene" / "first.bmp", 110)
+    _write_image(target_root / "scene" / "second.bmp", 120)
+
+    dataset = UnpairedImageDataset(
+        source_paths=[
+            source_root / "scene" / "first.png",
+            source_root / "scene" / "second.png",
+        ],
+        target_paths=[
+            target_root / "scene" / "second.bmp",
+            target_root / "scene" / "first.bmp",
+        ],
+        transform=lambda image: torch.from_numpy(image.copy()),
+        random_pairing=True,
+        source_root=source_root,
+        target_root=target_root,
+        pairing_mode="one_to_one",
+    )
+
+    target_indices = [
+        dataset._target_index(index, index)
+        for index in range(len(dataset))
+    ]
+    assert target_indices == [1, 0]
+    assert len(set(target_indices)) == len(target_indices)
+
+
+def test_one_to_one_fallback_uses_each_naturally_sorted_target_once(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    for name, value in (
+        ("source_1.png", 1),
+        ("source_2.png", 2),
+        ("source_10.png", 10),
+    ):
+        _write_image(source_root / name, value)
+    for name, value in (
+        ("target_1.png", 101),
+        ("target_2.png", 102),
+        ("target_10.png", 110),
+    ):
+        _write_image(target_root / name, value)
+
+    dataset = UnpairedImageDataset(
+        source_paths=sorted(source_root.glob("*.png")),
+        target_paths=sorted(target_root.glob("*.png")),
+        transform=lambda image: torch.from_numpy(image.copy()),
+        random_pairing=True,
+        source_root=source_root,
+        target_root=target_root,
+        pairing_mode="one_to_one",
+    )
+
+    target_by_source = {
+        path.name: dataset.target_paths[
+            dataset._target_index(index, index)
+        ].name
+        for index, path in enumerate(dataset.source_paths)
+    }
+    assert target_by_source == {
+        "source_1.png": "target_1.png",
+        "source_2.png": "target_2.png",
+        "source_10.png": "target_10.png",
+    }
+
+
+def test_one_to_one_rejects_unequal_total_counts(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    _write_images(source_root, count=2, offset=10)
+    _write_images(target_root, count=1, offset=100)
+
+    with pytest.raises(ValueError, match="equal source and target counts"):
+        UnpairedImageDataset(
+            source_paths=sorted(source_root.glob("*.png")),
+            target_paths=sorted(target_root.glob("*.png")),
+            transform=lambda image: torch.from_numpy(image.copy()),
+            random_pairing=True,
+            source_root=source_root,
+            target_root=target_root,
+            pairing_mode="one_to_one",
+        )
+
+
+def test_one_to_one_rejects_unequal_counts_within_scene_group(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    _write_images(source_root / "indoor", count=2, offset=10)
+    _write_images(source_root / "outdoor", count=1, offset=30)
+    _write_images(target_root / "indoor", count=1, offset=100)
+    _write_images(target_root / "outdoor", count=2, offset=200)
+
+    with pytest.raises(ValueError, match="equal counts inside every"):
+        UnpairedImageDataset(
+            source_paths=sorted(source_root.rglob("*.png")),
+            target_paths=sorted(target_root.rglob("*.png")),
+            transform=lambda image: torch.from_numpy(image.copy()),
+            random_pairing=True,
+            source_root=source_root,
+            target_root=target_root,
+            pairing_mode="one_to_one",
+        )
+
+
+def test_one_to_one_requires_explicit_validation_pairs(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    _write_images(source_root, count=6, offset=10)
+    _write_images(target_root, count=6, offset=100)
+
+    with pytest.raises(ValueError, match="requires explicit val_source_dir"):
+        CustomUnpairedDataModule(
+            source_dir=str(source_root),
+            target_dir=str(target_root),
+            crop_size=16,
+            resize_size=20,
+            num_workers=0,
+            pairing_mode="one_to_one",
+        )
+
+
 def test_weak_aligned_rejects_mismatched_scene_groups(tmp_path: Path) -> None:
     source_root = tmp_path / "source"
     target_root = tmp_path / "target"
@@ -316,7 +448,11 @@ def test_weak_aligned_rejects_mismatched_scene_groups(tmp_path: Path) -> None:
         )
 
 
-def test_weak_aligned_train_geometry_is_synchronized(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pairing_mode", ["weak_aligned", "one_to_one"])
+def test_aligned_train_geometry_is_synchronized(
+    tmp_path: Path,
+    pairing_mode: str,
+) -> None:
     train_source = tmp_path / "train" / "source"
     train_target = tmp_path / "train" / "target"
     val_source = tmp_path / "val" / "source"
@@ -337,7 +473,7 @@ def test_weak_aligned_train_geometry_is_synchronized(tmp_path: Path) -> None:
         horizontal_flip_probability=0.5,
         vertical_flip_probability=0.5,
         num_workers=0,
-        pairing_mode="weak_aligned",
+        pairing_mode=pairing_mode,
     )
     data_module.setup("fit")
 
@@ -371,6 +507,12 @@ def test_pairing_mode_config_accepts_weak_aligned() -> None:
     params = CustomUnpairedDataParams(pairing_mode="weak_aligned")
 
     assert params.pairing_mode is PairingMode.weak_aligned
+
+
+def test_pairing_mode_config_accepts_one_to_one() -> None:
+    params = CustomUnpairedDataParams(pairing_mode="one_to_one")
+
+    assert params.pairing_mode is PairingMode.one_to_one
 
 
 def test_pairing_mode_is_appended_to_data_module_signature() -> None:

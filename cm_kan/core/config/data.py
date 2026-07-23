@@ -16,6 +16,7 @@ class DataType(str, Enum):
 class PairingMode(str, Enum):
     random = 'random'
     weak_aligned = 'weak_aligned'
+    one_to_one = 'one_to_one'
 
 
 class DataPathes(BaseModel):

@@ -16,7 +16,7 @@ from torchvision.transforms.v2 import (
     ToImageTensor,
 )
 
-from .img_dataset import UnpairedImageDataset
+from .img_dataset import ALIGNED_PAIRING_MODES, UnpairedImageDataset
 
 
 DEFAULT_IMAGE_EXTENSIONS = (
@@ -200,15 +200,16 @@ class CustomUnpairedDataModule(L.LightningDataModule):
             )
 
         self.pairing_mode = getattr(pairing_mode, "value", pairing_mode)
-        if self.pairing_mode not in ("random", "weak_aligned"):
+        valid_pairing_modes = ("random", *ALIGNED_PAIRING_MODES)
+        if self.pairing_mode not in valid_pairing_modes:
             raise ValueError(
-                "pairing_mode must be either 'random' or 'weak_aligned', "
+                "pairing_mode must be 'random', 'weak_aligned', or 'one_to_one', "
                 f"got '{self.pairing_mode}'"
             )
-        if self.pairing_mode == "weak_aligned" and not has_val_source:
+        if self.pairing_mode in ALIGNED_PAIRING_MODES and not has_val_source:
             raise ValueError(
-                "weak_aligned pairing requires explicit val_source_dir and "
-                "val_target_dir so approximate pairs are not split independently"
+                "Aligned pairing requires explicit val_source_dir and "
+                "val_target_dir so pairs are not split independently"
             )
 
         if has_val_source:
@@ -281,12 +282,13 @@ class CustomUnpairedDataModule(L.LightningDataModule):
             RandomVerticalFlip(p=vertical_flip_probability),
             ConvertImageDtype(dtype=torch.float32),
         ])
-        self.weak_aligned_train_transform = WeakAlignedTrainTransform(
+        self.aligned_train_transform = WeakAlignedTrainTransform(
             resize_size=resize_size,
             crop_size=crop_size,
             horizontal_flip_probability=horizontal_flip_probability,
             vertical_flip_probability=vertical_flip_probability,
         )
+        self.weak_aligned_train_transform = self.aligned_train_transform
         self.eval_transform = Compose([
             ToImageTensor(),
             Resize(resize_size, antialias=True),
@@ -310,8 +312,8 @@ class CustomUnpairedDataModule(L.LightningDataModule):
                 target_root=self.train_target_root,
                 pairing_mode=self.pairing_mode,
                 paired_transform=(
-                    self.weak_aligned_train_transform
-                    if self.pairing_mode == "weak_aligned"
+                    self.aligned_train_transform
+                    if self.pairing_mode in ALIGNED_PAIRING_MODES
                     else None
                 ),
             )

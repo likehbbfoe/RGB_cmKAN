@@ -3,6 +3,14 @@ import torch
 from cm_kan.ml.pipelines.unsupervised import UnsupervisedPipeline
 
 
+def _encode_linear_srgb(images: torch.Tensor) -> torch.Tensor:
+    return torch.where(
+        images <= 0.0031308,
+        images * 12.92,
+        1.055 * images.pow(1 / 2.4) - 0.055,
+    )
+
+
 def test_chroma_loss_allows_multiplicative_brightness_change() -> None:
     image = torch.tensor([0.62, 0.41, 0.28]).view(1, 3, 1, 1)
     image = image.expand(1, 3, 32, 32)
@@ -75,6 +83,51 @@ def test_white_balance_statistics_detect_warm_shift() -> None:
     assert deltas[0, 0].item() > 0
     assert deltas[0, 1].item() < 0
     assert warm_bias.item() > 0
+
+
+def test_white_balance_statistics_prefer_neutral_pixels_over_saturated_color() -> None:
+    image = torch.tensor([0.90, 0.12, 0.10]).view(1, 3, 1, 1)
+    image = image.expand(1, 3, 16, 16).clone()
+    image[:, :, :, :4] = 0.5
+
+    statistics = UnsupervisedPipeline._white_balance_statistics(image)
+
+    assert statistics.abs().max().item() < 0.10
+
+
+def test_local_chroma_loss_allows_global_channel_gains() -> None:
+    generator = torch.Generator().manual_seed(11)
+    source_linear = torch.rand((2, 3, 16, 16), generator=generator) * 0.35 + 0.15
+    gains = torch.tensor([1.15, 0.90, 0.80]).view(1, 3, 1, 1)
+    prediction_linear = source_linear * gains
+
+    loss = UnsupervisedPipeline._local_chroma_loss(
+        _encode_linear_srgb(prediction_linear),
+        _encode_linear_srgb(source_linear),
+    )
+
+    assert loss.item() < 0.005
+
+
+def test_local_chroma_loss_detects_spatially_inconsistent_color_shift() -> None:
+    source = torch.full((1, 3, 16, 16), 0.5)
+    prediction = source.clone()
+    prediction[:, 0, 4:12, 4:12] = 0.75
+
+    loss = UnsupervisedPipeline._local_chroma_loss(prediction, source)
+
+    assert loss.item() > 0.05
+
+
+def test_local_chroma_loss_has_finite_prediction_gradients() -> None:
+    prediction = torch.rand((2, 3, 16, 16), requires_grad=True)
+    source = torch.rand((2, 3, 16, 16))
+
+    loss = UnsupervisedPipeline._local_chroma_loss(prediction, source)
+    loss.backward()
+
+    assert prediction.grad is not None
+    assert torch.isfinite(prediction.grad).all()
 
 
 def test_white_balance_statistics_have_finite_gradients() -> None:

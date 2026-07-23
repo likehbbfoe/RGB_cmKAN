@@ -49,6 +49,9 @@ class PipelineSelector:
                     reference_white_balance_ramp_epochs=(
                         config.pipeline.params.reference_white_balance_ramp_epochs
                     ),
+                    reference_local_chroma_weight=(
+                        config.pipeline.params.reference_local_chroma_weight
+                    ),
                     range_weight=config.pipeline.params.range_weight,
                     warmup_epochs=config.pipeline.params.warmup_epochs,
                     gradient_clip_val=config.pipeline.params.gradient_clip_val,

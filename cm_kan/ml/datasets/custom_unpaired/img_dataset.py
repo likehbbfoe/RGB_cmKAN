@@ -14,6 +14,7 @@ PairedImageTransform = Callable[
     [np.ndarray, np.ndarray],
     tuple[torch.Tensor, torch.Tensor],
 ]
+ALIGNED_PAIRING_MODES = ("weak_aligned", "one_to_one")
 
 
 def _natural_path_key(path: Path) -> tuple[tuple[bool, object], ...]:
@@ -116,6 +117,82 @@ def _build_weak_aligned_target_indices(
     return tuple(target_indices)
 
 
+def _build_one_to_one_target_indices(
+    source_paths: Sequence[Path],
+    target_paths: Sequence[Path],
+    source_root: Path,
+    target_root: Path,
+) -> tuple[int, ...]:
+    """Build a deterministic bijection between approximately paired domains.
+
+    Matching relative stems are preferred. If the names differ, each matching
+    relative subdirectory is naturally sorted and zipped. Unlike
+    ``weak_aligned``, this mode never repeats or drops a target image.
+    """
+    if len(source_paths) != len(target_paths):
+        raise ValueError(
+            "one_to_one pairing requires equal source and target counts; "
+            f"got source={len(source_paths)}, target={len(target_paths)}"
+        )
+
+    source_keys = tuple(_relative_stem(path, source_root) for path in source_paths)
+    target_keys = tuple(_relative_stem(path, target_root) for path in target_paths)
+    target_index_by_key = {
+        key: index for index, key in enumerate(target_keys)
+    }
+    has_unique_keys = (
+        len(set(source_keys)) == len(source_keys)
+        and len(target_index_by_key) == len(target_keys)
+    )
+    if has_unique_keys and set(source_keys) == set(target_keys):
+        return tuple(target_index_by_key[key] for key in source_keys)
+
+    source_by_group: dict[str, list[tuple[int, Path]]] = {}
+    target_by_group: dict[str, list[tuple[int, Path]]] = {}
+    for index, path in enumerate(source_paths):
+        group = _relative_parent(path, source_root)
+        source_by_group.setdefault(group, []).append((index, path))
+    for index, path in enumerate(target_paths):
+        group = _relative_parent(path, target_root)
+        target_by_group.setdefault(group, []).append((index, path))
+
+    source_groups = set(source_by_group)
+    target_groups = set(target_by_group)
+    if source_groups != target_groups:
+        source_only = sorted(source_groups - target_groups)
+        target_only = sorted(target_groups - source_groups)
+        raise ValueError(
+            "one_to_one pairing requires matching relative subdirectories; "
+            f"source-only groups={source_only}, target-only groups={target_only}"
+        )
+
+    target_indices = [-1] * len(source_paths)
+    for group in sorted(source_groups):
+        sources = sorted(
+            source_by_group[group],
+            key=lambda item: _natural_path_key(item[1]),
+        )
+        targets = sorted(
+            target_by_group[group],
+            key=lambda item: _natural_path_key(item[1]),
+        )
+        if len(sources) != len(targets):
+            raise ValueError(
+                "one_to_one pairing requires equal counts inside every relative "
+                f"subdirectory; group='{group}', source={len(sources)}, "
+                f"target={len(targets)}"
+            )
+        for (source_index, _), (target_index, _) in zip(sources, targets):
+            target_indices[source_index] = target_index
+
+    expected_target_indices = list(range(len(target_paths)))
+    if sorted(target_indices) != expected_target_indices:
+        raise RuntimeError(
+            "Failed to construct a complete one-to-one source/target pairing"
+        )
+    return tuple(target_indices)
+
+
 def _ensure_rgb(image: np.ndarray, path: Path) -> np.ndarray:
     """Return an HWC image with exactly three color channels."""
     if image.ndim == 2:
@@ -161,9 +238,10 @@ class UnpairedImageDataset(Dataset):
         self.pair_by_subdirectory = pair_by_subdirectory
         self.pairing_mode = getattr(pairing_mode, "value", pairing_mode)
         self.paired_transform = paired_transform
-        if self.pairing_mode not in ("random", "weak_aligned"):
+        valid_pairing_modes = ("random", *ALIGNED_PAIRING_MODES)
+        if self.pairing_mode not in valid_pairing_modes:
             raise ValueError(
-                "pairing_mode must be either 'random' or 'weak_aligned', "
+                "pairing_mode must be 'random', 'weak_aligned', or 'one_to_one', "
                 f"got '{self.pairing_mode}'"
             )
 
@@ -173,18 +251,29 @@ class UnpairedImageDataset(Dataset):
         expanded_target_root = (
             Path(target_root).expanduser() if target_root is not None else None
         )
-        self.weak_aligned_target_indices = None
-        if self.pairing_mode == "weak_aligned":
+        self.aligned_target_indices = None
+        if self.pairing_mode in ALIGNED_PAIRING_MODES:
             if expanded_source_root is None or expanded_target_root is None:
                 raise ValueError(
-                    "source_root and target_root are required for weak_aligned pairing"
+                    "source_root and target_root are required for aligned pairing"
                 )
-            self.weak_aligned_target_indices = _build_weak_aligned_target_indices(
+            index_builder = (
+                _build_one_to_one_target_indices
+                if self.pairing_mode == "one_to_one"
+                else _build_weak_aligned_target_indices
+            )
+            self.aligned_target_indices = index_builder(
                 self.source_paths,
                 self.target_paths,
                 expanded_source_root,
                 expanded_target_root,
             )
+        # Keep the old internal attribute for downstream code that inspected it.
+        self.weak_aligned_target_indices = (
+            self.aligned_target_indices
+            if self.pairing_mode == "weak_aligned"
+            else None
+        )
 
         self.source_groups = None
         self.target_indices_by_group = None
@@ -221,8 +310,8 @@ class UnpairedImageDataset(Dataset):
             }
 
     def _target_index(self, index: int, source_index: int) -> int:
-        if self.pairing_mode == "weak_aligned":
-            return self.weak_aligned_target_indices[source_index]
+        if self.pairing_mode in ALIGNED_PAIRING_MODES:
+            return self.aligned_target_indices[source_index]
 
         if self.pair_by_subdirectory:
             group = self.source_groups[source_index]
@@ -246,7 +335,7 @@ class UnpairedImageDataset(Dataset):
         target = _ensure_rgb(read_rgb_image(str(target_path)), target_path)
 
         if (
-            self.pairing_mode == "weak_aligned"
+            self.pairing_mode in ALIGNED_PAIRING_MODES
             and self.paired_transform is not None
         ):
             transformed_source, transformed_target = self.paired_transform(
@@ -263,6 +352,6 @@ class UnpairedImageDataset(Dataset):
         }
 
     def __len__(self) -> int:
-        if self.pairing_mode == "weak_aligned":
+        if self.pairing_mode in ALIGNED_PAIRING_MODES:
             return len(self.source_paths)
         return max(len(self.source_paths), len(self.target_paths))

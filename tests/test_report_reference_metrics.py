@@ -12,13 +12,18 @@ def _write_metrics(path: Path) -> None:
         "val_reference_style_ratio",
         "val_reference_style_loss",
         "val_reference_white_balance_loss",
+        "val_reference_local_chroma_loss",
         "val_fake_target_red_green_delta",
         "val_fake_target_blue_green_delta",
         "val_fake_target_warm_bias",
         "val_fake_target_warm_abs",
         "val_fake_target_warm_positive_fraction",
+        "val_fake_target_tint_bias",
+        "val_fake_target_tint_abs",
         "val_source_target_warm_bias",
         "val_source_target_warm_abs",
+        "val_source_target_tint_bias",
+        "val_source_target_tint_abs",
         "val_fake_target_luminance",
         "val_real_target_luminance",
         "val_range_loss",
@@ -37,13 +42,18 @@ def _write_metrics(path: Path) -> None:
             "val_reference_style_ratio": "0.90",
             "val_reference_style_loss": "0.05",
             "val_reference_white_balance_loss": "0.018",
+            "val_reference_local_chroma_loss": "0.021",
             "val_fake_target_red_green_delta": "0.012",
             "val_fake_target_blue_green_delta": "-0.008",
             "val_fake_target_warm_bias": "0.010",
             "val_fake_target_warm_abs": "0.014",
             "val_fake_target_warm_positive_fraction": "0.70",
+            "val_fake_target_tint_bias": "-0.011",
+            "val_fake_target_tint_abs": "0.013",
             "val_source_target_warm_bias": "0.030",
             "val_source_target_warm_abs": "0.040",
+            "val_source_target_tint_bias": "-0.020",
+            "val_source_target_tint_abs": "0.025",
             "val_fake_target_luminance": "0.47",
             "val_real_target_luminance": "0.49",
             "val_range_loss": "0.001",
@@ -66,13 +76,18 @@ def test_summarize_metrics_uses_latest_validation_epoch(tmp_path: Path) -> None:
     assert summary["fake_ref"] == 0.027
     assert summary["ratio"] == 0.90
     assert summary["wb_loss"] == 0.018
+    assert summary["local_chroma"] == 0.021
     assert summary["rg_delta"] == 0.012
     assert summary["bg_delta"] == -0.008
     assert summary["warm_bias"] == 0.010
     assert summary["warm_abs"] == 0.014
     assert summary["warm_positive"] == 0.70
+    assert summary["tint_bias"] == -0.011
+    assert summary["tint_abs"] == 0.013
     assert summary["source_warm"] == 0.030
     assert summary["source_warm_abs"] == 0.040
+    assert summary["source_tint"] == -0.020
+    assert summary["source_tint_abs"] == 0.025
     assert summary["target_luma"] == 0.49
     assert format_summary(epoch, summary).startswith(
         "epoch=136 source_ref=0.030000 fake_ref=0.027000 ratio=0.900000"
@@ -102,10 +117,16 @@ def test_summarize_metrics_keeps_new_metrics_optional_for_old_csv(
 
     assert epoch == 157
     assert summary["wb_loss"] is None
+    assert summary["local_chroma"] is None
     assert summary["warm_bias"] is None
     assert "wb_loss=NA" in output
+    assert "local_chroma=NA" in output
     assert "rg_delta=NA" in output
     assert "bg_delta=NA" in output
     assert "warm_bias=NA" in output
     assert "warm_abs=NA" in output
     assert "warm_positive=NA" in output
+    assert "tint_bias=NA" in output
+    assert "tint_abs=NA" in output
+    assert "source_tint=NA" in output
+    assert "source_tint_abs=NA" in output

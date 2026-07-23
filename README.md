@@ -125,10 +125,12 @@ intensity-invariant chromaticity consistency, and log-domain reflectance
 consistency. The last two terms keep subject color and local intrinsic contrast
 while still permitting smooth illumination changes. Optional scene-grouped sampling
 restricts source/target matching to corresponding relative subdirectories.
-`pairing_mode: weak_aligned` additionally creates a fixed rough correspondence and
-synchronizes geometric augmentation, while still avoiding pixel losses on imperfectly
-aligned pairs. PatchNCE compares cmKAN contextual patches between each input and its
-own translation to preserve content.
+`pairing_mode: weak_aligned` additionally creates a fixed rough correspondence,
+including unequal domain sizes. `pairing_mode: one_to_one` requires a bijection:
+each source uses exactly one target and no target is repeated or dropped. Both
+aligned modes synchronize geometric augmentation while still avoiding pixel losses
+on imperfectly aligned pairs. PatchNCE compares cmKAN contextual patches between
+each input and its own translation to preserve content.
 Adjust image size, split ratios, batch size, and training length in
 `configs/custom_unpaired.example.yaml`.
 
@@ -137,9 +139,10 @@ Adjust image size, split ratios, batch size, and training length in
 When the target domain contains several color temperatures or exposure styles,
 use the reference-guided model so each translation follows one selected target
 image instead of collapsing to an average target look. The dataset layout stays
-the same. The supplied reference configs use fixed weak alignment: a complete
-relative-filename correspondence is used when available; otherwise each scene
-directory is mapped by sorted position, including unequal source/target counts.
+the same. The supplied reference configs use strict one-to-one sampling: a complete
+relative-filename correspondence is used when available; otherwise each matching
+scene directory is naturally sorted and zipped. Counts must match globally and in
+every scene directory, so a target can never be silently reused.
 
 Reference-guided checkpoints contain additional conditioning layers and must be
 trained from scratch:
@@ -150,8 +153,10 @@ CUDA_VISIBLE_DEVICES=7 \
 ```
 
 The server config starts a separate experiment named
-`custom_weak_paired_reference_wb_v1`, so existing v6 checkpoints and CSV logs are
-left untouched. Its white-balance weight ramps over the first five epochs.
+`custom_one_to_one_reference_color_v2`, so existing v1/v6 checkpoints and CSV logs
+are left untouched. It uses a neutral-pixel white-balance estimate with a lower
+weight and light local-chroma protection; the white-balance weight ramps over five
+epochs.
 
 Use one target image as the reference for one source image or a source folder:
 

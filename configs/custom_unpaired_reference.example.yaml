@@ -1,4 +1,4 @@
-experiment: custom_weak_paired_reference_wb_v1
+experiment: custom_one_to_one_reference_color_v2
 save_dir: experiments
 resume: false
 accelerator: auto
@@ -33,7 +33,7 @@ data:
     num_workers: 4
     recursive: true
     pair_by_subdirectory: true
-    pairing_mode: weak_aligned
+    pairing_mode: one_to_one
     seed: 42
 
 pipeline:
@@ -62,8 +62,9 @@ pipeline:
     patch_nce_num_patches: 256
     patch_nce_temperature: 0.07
     reference_style_weight: 5.0
-    reference_white_balance_weight: 3.0
+    reference_white_balance_weight: 1.0
     reference_white_balance_ramp_epochs: 5
+    reference_local_chroma_weight: 0.25
     range_weight: 1.0
     warmup_epochs: 0
     gradient_clip_val: 1.0

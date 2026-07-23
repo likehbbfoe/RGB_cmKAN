@@ -120,8 +120,9 @@ my_dataset/
         └── ...
 ```
 
-source 和 target 是两个独立域，文件名和图片数量都不需要对应。加载器支持
-PNG、JPG、JPEG、BMP、TIFF 和 WebP，并默认递归扫描子目录。
+在默认的 `pairing_mode: random` 下，source 和 target 是两个独立域，文件名和图片
+数量都不需要对应。加载器支持 PNG、JPG、JPEG、BMP、TIFF 和 WebP，并默认递归
+扫描子目录。本项目当前推荐的一对一参考训练则使用后面说明的 `one_to_one`。
 
 如果两域只能做到主题或场景类别相似，可以在 source 和 target 下建立相同的
 相对子目录，并设置 `pair_by_subdirectory: true`：
@@ -138,28 +139,33 @@ my_dataset/train/
     └── portrait/...
 ```
 
-`pairing_mode: random` 时，同名子目录之间仍然随机非配对采样。
-`pairing_mode: weak_aligned` 时，如果两边完整的相对文件名集合（忽略扩展名）
-能够一一对应，就按文件名精确匹配；否则在同名子目录内按自然数字排序位置建立固定映射
-（例如 `2.jpg` 会排在 `10.jpg` 前面）。
-两域数量可以不同，例如
-181 张 source 与 60 张 target 会让相邻的多个 source 稳定共享一个 target，而不会
-每轮随机换参考。两种模式都不要求人物姿态或像素位置严格对齐。source 和 target
-的相对子目录集合必须一致；平铺目录会自动归入同一个全局组。
+三种 `pairing_mode` 的含义如下：
+
+- `random`：同名子目录之间仍然随机非配对采样。
+- `weak_aligned`：建立固定弱配对；数量不同时允许相邻 source 共享 target。
+- `one_to_one`：严格保证“一个 source 对应一个 target”，不重复也不遗漏任何 target。
+
+后两种模式都会优先按完整且唯一的相对文件名匹配（忽略扩展名）。如果文件名集合无法
+完整匹配，就在同名相对子目录中分别按自然数字顺序排序再一一对应，例如 `2.jpg` 会排在
+`10.jpg` 前面。`one_to_one` 要求 train、val（以及显式 test）中的两域总数相同、相对
+子目录集合相同、每个对应子目录的图片数也相同；任一条件不满足都会在训练开始时直接
+报错，绝不会偷偷复用 target。最好让真正对应的图片使用相同相对文件名；否则必须保证
+两边自然排序后的顺序就是实际对应顺序。三种模式都不代表人物姿态或像素位置严格对齐，
+平铺目录会自动归入同一个全局组。
 
 ### train、val 与 test 的处理
 
 | 数据部分 | 当前行为 |
 | --- | --- |
 | `train/source` | 按 DataLoader 顺序取样，DataLoader 本身会 shuffle |
-| `train/target` | `random` 时随机选择；`weak_aligned` 时使用固定的弱配对 target |
+| `train/target` | `random` 时随机选择；`weak_aligned` 时固定弱配对；`one_to_one` 时唯一固定配对 |
 | `val/source`、`val/target` | 直接使用独立 val，不从 train 再划分 |
 | `test/source`、`test/target` | 如果存在则直接使用 |
 | 没有 `test` | 测试加载器复用 val，但不会混入训练集 |
-| 没有 `val` | 按配置比例从两个训练域分别确定性划分 |
+| 没有 `val` | 仅 `random` 可按比例分别划分；两个对齐模式要求显式 val，避免拆散配对 |
 
-验证阶段始终使用确定映射。即使选择 `weak_aligned`，target 也只是内容近似的颜色
-参考，不会被当作 source 的像素级真值；验证仍使用 cycle、identity 和参考统计 loss。
+验证阶段始终使用确定映射。即使选择 `one_to_one`，target 也只是内容近似的颜色参考，
+不会被当作 source 的像素级真值；验证仍使用 cycle、identity 和参考统计 loss。
 
 ### 图像增强
 
@@ -172,8 +178,9 @@ my_dataset/train/
 5. 按配置选择是否垂直翻转
 6. 转为 `float32` 并归一化到 `[0, 1]`
 
-弱配对训练会让 source 和 target 使用同一归一化裁剪位置和相同翻转决定；即使两张
-图的原始长宽比不同，也会裁取各自画面中的相近区域。完全非配对模式仍独立增强两域。
+`weak_aligned` 和 `one_to_one` 会让 source 与 target 使用同一归一化裁剪位置和相同
+翻转决定；即使两张图的原始长宽比不同，也会裁取各自画面中的相近区域。完全非配对
+模式仍独立增强两域。
 val/test 使用 Resize 和中心裁剪，不使用随机增强。颜色抖动被刻意省略，因为
 颜色变化会干扰 source/target 颜色分布的学习。
 
@@ -371,7 +378,7 @@ flowchart LR
 控制全局色彩、色温、明暗和对比度，不会把参考人物、纹理或构图复制到 source。
 source 自身的上下文编码仍负责生成逐位置变化的 KAN 权重。
 
-### 弱配对参考监督（不是像素级监督）
+### 一对一弱配对参考监督（不是像素级监督）
 
 参考图模式继续使用原来的目录：
 
@@ -385,10 +392,10 @@ my_dataset/
     └── target/...
 ```
 
-不需要新增 `reference/` 目录。当前参考配置使用 `pairing_mode: weak_aligned`：每个
-source 会得到一个固定的大致对应 target，target 是该次 `source → target` 的正向
-颜色参考；对应地，source 是 `target → source` 的反向参考。`val/target` 也是验证
-和四图预览中真正使用的参考。
+不需要新增 `reference/` 目录。当前参考配置使用 `pairing_mode: one_to_one`：每个
+source 只会得到自己唯一的大致对应 target，target 是该次 `source → target` 的正向
+颜色参考；对应地，source 是 `target → source` 的反向参考。`val/target` 也是验证和
+四图预览中真正使用的参考。这里的“一对一”约束的是样本关系，不表示空间像素对齐。
 
 这里没有计算 `L1(fake_B, target)` 或 `SSIM(fake_B, target)`，因为大致配对图片仍可能
 存在人物动作、构图和空间位置差异。target 只监督全局颜色、曝光和白平衡；Cycle、
@@ -411,8 +418,9 @@ batch 的平均分布。训练 CSV 中可检查 `gen_reference_style_a_loss`、
 ### Reference white-balance loss
 
 原来的 10 维风格距离会混合亮度、对比度和颜色，无法明确惩罚系统性偏暖。新版
-在线性 RGB 中逐像素计算 `u=log(R/G)`、`v=log(B/G)`，忽略接近纯黑/过曝的像素，
-并用一次 detached 鲁棒重加权降低少数肤色或高饱和物体对估计的支配。然后定义：
+在线性 RGB 中逐像素计算 `u=log(R/G)`、`v=log(B/G)`，忽略接近纯黑/过曝的像素。
+v2 会先软性提高低饱和、接近中性的像素权重，再做一次 detached 鲁棒重加权，避免
+大面积肤色、彩色墙面或高饱和物体被错误当成整张图的白平衡。然后定义：
 
 ```text
 warm = 0.5 × (u - v) = 0.5 × log(R/B)
@@ -426,11 +434,13 @@ L_wb = ρ(warm_fake - warm_reference)
 像素选择权重和参考统计都会停止梯度，防止生成器通过操纵 mask 逃避约束。这个 loss
 只匹配整图冷暖与绿—洋红偏色，不复制参考图中的脸、墙面或纹理，也不要求空间对齐。
 
-参考配置将 `exposure_weight` 与 `chroma_weight` 设为 `0`，这是有意为之：这两项
-旧 loss 会要求输出保持 source 原有亮度和色度，恰好会抵消参考图要求的变暗、
-变亮、偏暖或偏冷。逐样本 `reference_style_weight` 已接管颜色和曝光监督；
-PatchNCE 与 reflectance loss 继续保护人物、场景结构和局部细节。参考配置也不再
-依赖 batch 平均的 domain statistics 来决定某一张输出的颜色。
+参考配置继续将 `exposure_weight` 与旧的 `chroma_weight` 设为 `0`，避免抵消参考图
+要求的全局明暗或白平衡变化。v2 新增 `reference_local_chroma_weight: 0.25`：它先从
+fake 与原输入之间的逐像素 log-chroma 变化中减去整张图的平均通道增益，只惩罚剩余的
+局部不一致颜色漂移。因此它允许参考图要求的全局冷暖变化，同时轻量保护肤色、衣服和
+背景之间的相对颜色关系。v2 还把白平衡权重从 `3.0` 降到 `1.0`，因为第 199 轮统计
+显示亮度已经对齐、冷暖平均偏差接近零，继续使用过强的整图白平衡约束反而容易过校色。
+`reference_style_weight: 5.0` 保持不变，PatchNCE 与 reflectance loss 继续保护结构细节。
 
 ### 必须从头训练新 checkpoint
 
@@ -470,15 +480,15 @@ CUDA_VISIBLE_DEVICES=7 python main.py train \
 当前服务器配置使用独立实验名：
 
 ```yaml
-experiment: custom_weak_paired_reference_wb_v1
+experiment: custom_one_to_one_reference_color_v2
 resume: false
 ```
 
-因此它不会覆盖原来的 `custom_unpaired_reference_v6`、第 157 轮 checkpoint 或旧
-`metrics.csv`。新版从第 0 轮学习固定弱配对和白平衡约束，便于与 v6 做干净对比。
-白平衡权重在最初 5 轮按 `0.6、1.2、1.8、2.4、3.0` 增长，之后保持 `3.0`；调度使用
-绝对 epoch，所以新实验中途断点续训不会重新开始缓升。配置每轮检查并保存
-`last.ckpt` 与当前最佳 checkpoint。
+因此它不会覆盖原来的 v1、`custom_unpaired_reference_v6`、既有 checkpoint 或旧
+`metrics.csv`。v2 从第 0 轮学习严格一对一参考、低饱和中性白平衡和局部色度保护。
+白平衡权重在最初 5 轮按 `0.2、0.4、0.6、0.8、1.0` 增长，之后保持 `1.0`；调度使用
+绝对 epoch，所以中途断点续训不会重新开始缓升。建议先比较第 5、20、50 轮的同一组六组
+预览与统计，不必等满 200 轮才判断。配置每轮保存 `last.ckpt` 与当前最佳 checkpoint。
 
 ### 用一张参考图推理
 
@@ -590,7 +600,7 @@ python main.py train \
 | `resize_size` | 裁剪前的缩放尺寸，必须不小于 `crop_size` |
 | `num_workers` | DataLoader 工作进程数，排错时可设为 `0` |
 | `pair_by_subdirectory` | 限制两域只能在相同相对子目录内匹配 |
-| `pairing_mode` | `random` 为完全非配对；`weak_aligned` 为固定弱配对并同步增强 |
+| `pairing_mode` | `random` 为非配对；`weak_aligned` 可复用 target；`one_to_one` 严格唯一配对 |
 | `batch_size` | 训练 batch size |
 | `val_batch_size` | 验证 batch size |
 | `lr` | 生成器和判别器初始学习率 |
@@ -604,6 +614,7 @@ python main.py train \
 | `reference_style_weight` | 每张生成结果靠近本次参考图颜色统计的约束权重 |
 | `reference_white_balance_weight` | 生成结果匹配参考图中性/中间调区域白平衡的约束权重 |
 | `reference_white_balance_ramp_epochs` | 从第 0 轮起把白平衡权重线性升到设定值所用轮数 |
+| `reference_local_chroma_weight` | 保留全局通道增益后，限制局部相对色度漂移的权重 |
 | `exposure_weight` | 同图转换前后亮度和对比度保持权重 |
 | `chroma_weight` | 同图转换前后的强度无关色度保持权重，抑制肤色偏移 |
 | `reflectance_weight` | 去除平滑光照后的局部反射一致性权重 |
@@ -643,10 +654,10 @@ source | source_to_target | 真实 target | CIE 1931 xy 色度散点图
 线性化并转换到 CIE XYZ，再计算 `x=X/(X+Y+Z)`、`y=Y/(X+Y+Z)`，把
 source、迁移结果和 target 的色度点叠加到同一个 CIE 1931 xy 散点图中。
 黑色附近无法稳定计算色度的像素会被过滤，每组的 `×` 标记表示色度质心。
-迁移结果点云及质心越接近 target，说明色彩统计越接近目标域。第三列 target
-来自同一个非配对验证 batch，不是该 source 的配对真值。在普通模式中它只作
-统计和视觉参考；在参考图模式中，它同时是本行 source 转换时真正使用的风格
-参考，因此可以直接比较迁移结果是否向该参考靠近。
+迁移结果点云及质心越接近 target，说明色彩统计越接近目标域。在 `random` 普通模式中，
+第三列只是同一验证 batch 的非配对统计参考；在当前 `one_to_one` 参考模式中，它是本行
+source 唯一对应且真正用于转换的风格参考，因此可以直接比较迁移结果是否向它靠近，
+但仍不是像素级真值。
 每组最多显示 600 个均匀抽样点以避免点云过密；绘制顺序为 source、target、
 迁移结果，所以迁移结果始终位于散点图最上层。四列预览按输入尺寸的 2 倍保存，
 以提高图片和坐标文字的清晰度。
@@ -663,7 +674,7 @@ source 与 target 的色度质心距离，`F-T` 是迁移结果与 target 的色
 epoch 固定使用同样的 6 组，因此不同 epoch 的迁移效果仍可直接比较。输出图片
 共有 6 行、每行 4 列。六组 source 会逐张送入模型并在 CPU 上拼图，不会因为
 预览而把 GPU 推理 batch size 提高到 6。启用场景子目录分组时，候选
-source/target 仍来自数据加载器给出的同组非配对样本，不会跨组重新组合。
+source/target 仍来自数据加载器给出的一对一样本，不会跨组重新组合。
 
 `metrics.csv` 中可看到：
 
@@ -680,6 +691,7 @@ source/target 仍来自数据加载器给出的同组非配对样本，不会跨
 - `gen_patch_nce_a_loss`、`gen_patch_nce_b_loss`
 - `gen_reference_style_a_loss`、`gen_reference_style_b_loss`（参考图模式）
 - `gen_reference_white_balance_a_loss`、`gen_reference_white_balance_b_loss`（白平衡监督）
+- `gen_reference_local_chroma_a_loss`、`gen_reference_local_chroma_b_loss`（局部色度保护）
 - `fake_a_luminance`、`fake_b_luminance`
 - `real_a_luminance`、`real_b_luminance`
 - `dis_a_loss`、`dis_b_loss` 以及各方向真假分数
@@ -690,11 +702,14 @@ source/target 仍来自数据加载器给出的同组非配对样本，不会跨
 - `val_reference_style_loss`（参考图模式）
 - `val_reference_style_ratio`（参考图模式；小于 `1` 表示生成图比原 source 更靠近参考图）
 - `val_reference_white_balance_loss`（生成图与两方向参考图的白平衡差异，越小越好）
+- `val_reference_local_chroma_loss`（扣除全局通道增益后的局部色度变化，越小越稳定）
 - `val_fake_target_red_green_delta`、`val_fake_target_blue_green_delta`
 - `val_fake_target_warm_bias`（正值表示 fake target 比参考 target 偏暖，负值表示偏冷）
 - `val_fake_target_warm_abs`（逐样本冷暖绝对偏差，避免正负抵消）
 - `val_fake_target_warm_positive_fraction`（比参考偏暖的样本比例）
+- `val_fake_target_tint_bias`、`val_fake_target_tint_abs`（绿—洋红轴平均/绝对偏差）
 - `val_source_target_warm_bias`、`val_source_target_warm_abs`（迁移前基线）
+- `val_source_target_tint_bias`、`val_source_target_tint_abs`（迁移前绿—洋红基线）
 - `val_loss`
 - 学习率
 
@@ -709,7 +724,7 @@ python scripts/report_reference_metrics.py
 
 脚本只读取 `metrics.csv`，不读取图片、文件名或数据路径，并输出一行可以直接
 复制的汇总结果。默认路径是
-`experiments/custom_weak_paired_reference_wb_v1/logs/metrics.csv`；如果实验目录不同，
+`experiments/custom_one_to_one_reference_color_v2/logs/metrics.csv`；如果实验目录不同，
 可以把实际 CSV 路径作为第一个参数：
 
 ```bash
@@ -719,6 +734,7 @@ python scripts/report_reference_metrics.py /path/to/metrics.csv
 报告中的新增字段含义如下：
 
 - `wb_loss`：两方向白平衡误差，越小越好。
+- `local_chroma`：扣除允许的全局通道增益后，局部相对颜色变化的两方向误差。
 - `rg_delta`：fake target 相对 target 的 `log(R/G)` 偏差；正值表示红相对绿更多。
 - `bg_delta`：fake target 相对 target 的 `log(B/G)` 偏差；正值表示蓝相对绿更多。
 - `warm_bias`：综合冷暖偏差，`> 0` 表示 fake target 偏暖，`< 0` 表示偏冷，越接近
@@ -726,10 +742,13 @@ python scripts/report_reference_metrics.py /path/to/metrics.csv
 - `warm_abs`：逐样本冷暖偏差绝对值的平均，越小越好；它不会因一部分偏暖、
   另一部分偏冷而互相抵消。
 - `warm_positive`：生成图比参考偏暖的样本比例；接近 `1` 表示普遍偏暖。
+- `tint_bias`：`0.5 × (rg_delta + bg_delta)`；负值表示相对偏绿，正值表示相对偏洋红。
+- `tint_abs`：逐样本绿—洋红偏差绝对值的平均，越小越好。
 - `source_warm`、`source_warm_abs`：迁移前 source 相对 target 的基线，用来判断
   模型是否真正缩小了色温差。
+- `source_tint`、`source_tint_abs`：迁移前绿—洋红方向的对应基线。
 
-如果把旧 v6 CSV 路径传给脚本，因为旧日志没有这些列，脚本会正常输出
+如果把旧 v1/v6 CSV 路径传给脚本，因为旧日志没有这些列，脚本会正常输出
 `wb_loss=NA` 等字段；新版完成至少一次验证后就会出现数值。
 
 断点续训时，将配置改为：
