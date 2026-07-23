@@ -55,6 +55,12 @@ class ModelSelector:
                     grid_range=config.model.params.grid_range,
                     output_mode=config.model.params.output_mode,
                     max_logit_shift=config.model.params.max_logit_shift,
+                    reference_condition_scale=(
+                        config.model.params.reference_condition_scale
+                    ),
+                    reference_direct_conditioning=(
+                        config.model.params.reference_direct_conditioning
+                    ),
                 )
             case _:
                 raise ValueError(f'Unupported model type f{config.model.type}')

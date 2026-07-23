@@ -10,7 +10,8 @@ class CmKANLayer(torch.nn.Module):
 
     def __init__(self, in_channels, out_channels, grid_size, spline_order,
                  residual_std, grid_range, condition_dim=0,
-                 output_mode='legacy', max_logit_shift=1.5):
+                 output_mode='legacy', max_logit_shift=1.5,
+                 direct_conditioning=False):
         super(CmKANLayer, self).__init__()
 
         self.output_mode = getattr(output_mode, 'value', output_mode)
@@ -52,6 +53,7 @@ class CmKANLayer(torch.nn.Module):
             in_channels,
             self.kan_params_num,
             condition_dim=condition_dim,
+            direct_conditioning=direct_conditioning,
         )
 
     def kan(self, x, w):
@@ -133,12 +135,15 @@ class CmKANLayer(torch.nn.Module):
 class LightCmKANLayer(CmKANLayer):
     def __init__(self, in_channels, out_channels, grid_size, spline_order,
                  residual_std, grid_range, condition_dim=0,
-                 output_mode='legacy', max_logit_shift=1.5):
+                 output_mode='legacy', max_logit_shift=1.5,
+                 direct_conditioning=False):
         super(LightCmKANLayer, self).__init__(in_channels, out_channels, grid_size, spline_order,
                  residual_std, grid_range, condition_dim=condition_dim,
-                 output_mode=output_mode, max_logit_shift=max_logit_shift)
+                 output_mode=output_mode, max_logit_shift=max_logit_shift,
+                 direct_conditioning=direct_conditioning)
         self.generator = LightGeneratorLayer(
             in_channels,
             self.kan_params_num,
             condition_dim=condition_dim,
+            direct_conditioning=direct_conditioning,
         )

@@ -14,16 +14,16 @@ from typing import Iterable, Mapping
 DEFAULT_METRICS_PATH = Path(
     os.environ.get(
         "CMKAN_METRICS_PATH",
-        "experiments/custom_one_to_one_reference_color_v3_stable/logs/metrics.csv",
+        "experiments/custom_one_to_one_reference_color_v4_conditioned/logs/metrics.csv",
     )
 )
 
 COMPACT_OUTPUT_METRICS = (
-    ("selection", "val_reference_selection_loss"),
     ("ratio", "val_reference_style_ratio"),
+    ("move", "val_source_fake_l1"),
+    ("response", "val_reference_response_l1"),
+    ("direct", "val_reference_direct_parameter_rms"),
     ("luma_ratio", "val_fake_target_luminance_ratio"),
-    ("local_tail", "val_fake_target_local_chroma_tail"),
-    ("red_tail", "val_fake_target_local_red_tail"),
     ("red_bad", "val_fake_target_local_red_bad_fraction"),
 )
 
@@ -53,6 +53,16 @@ LEGACY_OUTPUT_METRICS = (
 SAFETY_OUTPUT_METRICS = (
     ("selection", "val_reference_selection_loss"),
     ("luma_ratio", "val_fake_target_luminance_ratio"),
+    ("move", "val_source_fake_l1"),
+    ("response", "val_reference_response_l1"),
+    ("condition", "val_reference_condition_mean_abs"),
+    ("direct_weight", "val_reference_direct_weight_rms"),
+    ("direct", "val_reference_direct_parameter_rms"),
+    ("affine_weight", "val_reference_affine_weight_rms"),
+    (
+        "condition_saturation",
+        "val_reference_condition_saturation_fraction",
+    ),
     ("local_mean", "val_fake_target_local_chroma_mean"),
     ("local_tail", "val_fake_target_local_chroma_tail"),
     ("local_bad", "val_fake_target_local_chroma_bad_fraction"),

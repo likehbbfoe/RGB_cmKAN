@@ -18,6 +18,7 @@ class CycleCmKAN(torch.nn.Module):
         condition_dim=0,
         output_mode='legacy',
         max_logit_shift=1.5,
+        direct_conditioning=False,
     ):
         super(CycleCmKAN, self).__init__()
 
@@ -33,6 +34,7 @@ class CycleCmKAN(torch.nn.Module):
             condition_dim=condition_dim,
             output_mode=output_mode,
             max_logit_shift=max_logit_shift,
+            direct_conditioning=direct_conditioning,
         )
         self.gen_ba = CmKAN(
             in_dims=out_dims,
@@ -44,6 +46,7 @@ class CycleCmKAN(torch.nn.Module):
             condition_dim=condition_dim,
             output_mode=output_mode,
             max_logit_shift=max_logit_shift,
+            direct_conditioning=direct_conditioning,
         )
         self.dis_a = PatchDiscriminator(in_dim=in_dims[0])
         self.dis_b = PatchDiscriminator(in_dim=out_dims[0])
@@ -64,7 +67,17 @@ class ReferenceCycleCmKAN(CycleCmKAN):
         grid_range,
         output_mode='legacy',
         max_logit_shift=1.5,
+        reference_condition_scale=1.0,
+        reference_direct_conditioning=False,
     ):
+        if reference_condition_scale <= 0:
+            raise ValueError(
+                "reference_condition_scale must be greater than zero"
+            )
+        self.reference_condition_scale = float(reference_condition_scale)
+        self.reference_direct_conditioning = bool(
+            reference_direct_conditioning
+        )
         super().__init__(
             in_dims=in_dims,
             out_dims=out_dims,
@@ -75,6 +88,7 @@ class ReferenceCycleCmKAN(CycleCmKAN):
             condition_dim=ReferenceStyleEncoder.output_dim,
             output_mode=output_mode,
             max_logit_shift=max_logit_shift,
+            direct_conditioning=self.reference_direct_conditioning,
         )
         self.style_encoder = ReferenceStyleEncoder()
 
@@ -87,4 +101,8 @@ class ReferenceCycleCmKAN(CycleCmKAN):
         reference: torch.Tensor,
     ) -> torch.Tensor:
         """Describe the per-image color change requested by the reference."""
-        return self.encode_style(reference) - self.encode_style(inputs)
+        style_delta = self.encode_style(reference) - self.encode_style(inputs)
+        scaled_delta = self.reference_condition_scale * style_delta
+        if self.reference_direct_conditioning:
+            return torch.tanh(scaled_delta)
+        return scaled_delta

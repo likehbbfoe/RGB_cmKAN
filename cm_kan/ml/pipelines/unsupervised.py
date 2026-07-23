@@ -139,6 +139,68 @@ class UnsupervisedPipeline(L.LightningModule):
             )
         return self.model.style_condition(inputs, reference)
 
+    def _reference_conditioning_weight_rms(self):
+        """Return RMS weights for the direct and affine reference paths."""
+        zero = next(self.model.parameters()).new_zeros(())
+        if not self.reference_guided:
+            return zero, zero
+
+        direct_parameters = []
+        affine_parameters = []
+        for generator in (self.model.gen_ab, self.model.gen_ba):
+            for layer in generator.layers:
+                parameter_generator = layer.generator
+                style_direct = getattr(
+                    parameter_generator,
+                    "style_direct",
+                    None,
+                )
+                if style_direct is not None:
+                    direct_parameters.append(style_direct.weight)
+                style_affine = getattr(
+                    parameter_generator,
+                    "style_affine",
+                    None,
+                )
+                if style_affine is not None:
+                    affine_parameters.append(style_affine[-1].weight)
+
+        def parameter_rms(parameters):
+            if not parameters:
+                return zero
+            squared_sum = sum(
+                parameter.detach().float().square().sum()
+                for parameter in parameters
+            )
+            parameter_count = sum(
+                parameter.numel() for parameter in parameters
+            )
+            return (squared_sum / parameter_count).sqrt()
+
+        return (
+            parameter_rms(direct_parameters),
+            parameter_rms(affine_parameters),
+        )
+
+    def _reference_direct_parameter_rms(self, generator, condition):
+        """Measure the condition-specific KAN parameters from the direct path."""
+        values = []
+        for layer in generator.layers:
+            style_direct = getattr(
+                layer.generator,
+                "style_direct",
+                None,
+            )
+            if style_direct is not None:
+                values.append(style_direct(condition).detach().float())
+        if not values:
+            return condition.new_zeros(())
+        flattened = torch.cat(
+            [value.reshape(-1) for value in values],
+            dim=0,
+        )
+        return flattened.square().mean().sqrt()
+
     def _reference_style_loss(self, predictions, reference):
         if not self.reference_guided:
             return predictions.new_zeros(())
@@ -675,14 +737,18 @@ class UnsupervisedPipeline(L.LightningModule):
                     nn.init.constant_(m.bias, 0)
                 elif isinstance(m, nn.Linear):
                     nn.init.normal_(m.weight, 0, 0.01)
-                    nn.init.constant_(m.bias, 0)
+                    if m.bias is not None:
+                        nn.init.constant_(m.bias, 0)
 
             if self.reference_guided:
                 for module in self.model.modules():
-                    style_affine = getattr(module, "style_affine", None)
-                    if style_affine is not None:
-                        nn.init.zeros_(style_affine[-1].weight)
-                        nn.init.zeros_(style_affine[-1].bias)
+                    reset_reference_conditioning = getattr(
+                        module,
+                        "reset_reference_conditioning",
+                        None,
+                    )
+                    if reset_reference_conditioning is not None:
+                        reset_reference_conditioning()
 
             # The bounded residual mode is intentionally initialized as an
             # identity transform after the generic Kaiming pass above.
@@ -1410,6 +1476,29 @@ class UnsupervisedPipeline(L.LightningModule):
             input_distance, fake_distance, distance_ratio = (
                 self._reference_style_distances(source, fake_target, target)
             )
+            no_reference_target = self.model.gen_ab(
+                source,
+                self._style_condition(source, source),
+            )
+            source_fake_l1 = F.l1_loss(fake_target, source)
+            reference_response_l1 = F.l1_loss(
+                fake_target,
+                no_reference_target,
+            )
+            reference_condition_mean_abs = target_condition.abs().mean()
+            (
+                reference_direct_weight_rms,
+                reference_affine_weight_rms,
+            ) = self._reference_conditioning_weight_rms()
+            reference_direct_parameter_rms = (
+                self._reference_direct_parameter_rms(
+                    self.model.gen_ab,
+                    target_condition,
+                )
+            )
+            reference_condition_saturation_fraction = (
+                (target_condition.abs() > 0.95).float().mean()
+            )
             fake_target_luminance = self._luminance_mean(fake_target)
             real_target_luminance = self._luminance_mean(target)
             fake_target_luminance_error = (
@@ -1511,6 +1600,48 @@ class UnsupervisedPipeline(L.LightningModule):
             self.log(
                 f'{stage}_fake_target_luminance_ratio',
                 fake_target_luminance_ratio,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_source_fake_l1',
+                source_fake_l1,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_reference_response_l1',
+                reference_response_l1,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_reference_condition_mean_abs',
+                reference_condition_mean_abs,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_reference_direct_weight_rms',
+                reference_direct_weight_rms,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_reference_direct_parameter_rms',
+                reference_direct_parameter_rms,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_reference_affine_weight_rms',
+                reference_affine_weight_rms,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_reference_condition_saturation_fraction',
+                reference_condition_saturation_fraction,
                 prog_bar=False,
                 logger=True,
             )

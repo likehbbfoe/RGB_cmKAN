@@ -24,6 +24,8 @@ class CmKanModelParams(BaseModel):
     grid_range: List[float] = [0.0, 1.0]
     output_mode: CmKanOutputMode = CmKanOutputMode.legacy
     max_logit_shift: float = Field(default=1.5, gt=0)
+    reference_condition_scale: float = Field(default=1.0, gt=0)
+    reference_direct_conditioning: bool = False
 
 
 class Model(BaseModel):

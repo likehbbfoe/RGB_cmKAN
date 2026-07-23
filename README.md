@@ -149,36 +149,46 @@ Reference-guided checkpoints contain additional conditioning layers and must be
 trained from scratch:
 
 ```bash
-CUDA_VISIBLE_DEVICES=7 \
-./scripts/train_custom_unpaired_reference_v3.sh
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=7 \
+./scripts/train_custom_unpaired_reference_v4.sh
 ```
 
 The server config starts a separate experiment named
-`custom_one_to_one_reference_color_v3_stable`, so existing v1/v2/v6 checkpoints
-and CSV logs are left untouched. This stability configuration trains for 200
-epochs; the earlier 50-epoch setting was only a safety pilot. It uses five
-epochs of the complete non-adversarial generator objective, then ramps the
-adversarial weight from `0.1` at epoch 5 to `1.0` at epoch 14. The generator
-learning rate is `1e-4`, the discriminator uses half that rate, exposure
-preservation has weight `2.0`, and the bounded logit shift is limited to `1.0`.
-Keep `resume: false` and do not resume a checkpoint that already produced black
-outputs.
+`custom_one_to_one_reference_color_v4_conditioned`, so existing v1/v2/v3/v6
+checkpoints and CSV logs are left untouched. v4 addresses a measured
+`ratio=0.9972` with `luma_ratio=1.03`: exposure was stable, but the output was
+almost identical to the source and the reference branch was effectively
+ignored. It scales the style delta by 10, applies a smooth `tanh` bound, and
+adds a zero-initialized direct path from that condition to the spatial KAN
+parameter tensor. The contextual branch still supplies spatial variation.
+Both conditional output heads start at zero, so the zero-update output remains
+the source image while useful condition gradients are available on the first
+update.
+
+The v4 stability configuration trains for 200 epochs. It keeps the v3 bounded
+output and local color safeguards, uses five epochs of the complete
+non-adversarial generator objective, then ramps the adversarial weight from
+`0.1` at epoch 5 to `1.0` at epoch 14. Keep `resume: false`: a v3 checkpoint can
+still be loaded with the v3/default model structure, but it cannot be resumed
+as v4 because v4 has new parameters and optimizer state.
 
 Before training updates, the callback saves
-`experiments/custom_one_to_one_reference_color_v3_stable/logs/figures/initial_source_to_target_0.png`;
+`experiments/custom_one_to_one_reference_color_v4_conditioned/logs/figures/initial_source_to_target_0.png`;
 it should look like the source because the bounded residual head starts from
 identity. The sibling `source_to_target_0.png` is saved after the first complete
 warm-up epoch. Reference-guided best checkpoints monitor
 `val_reference_selection_loss`, which excludes the changing discriminator
-score. The CSV also records
-`val_fake_target_luminance_ratio` and `effective_adversarial_weight`.
-The v2 config and launcher remain available for exact rollback.
+score. Run `python scripts/report_reference_metrics.py` for the compact
+`ratio/move/response/direct/luma_ratio/red_bad` report. During epochs 1–5,
+`response` and `direct` should leave zero and `ratio` should begin falling below
+`0.99`; otherwise stop early and inspect the full report. The v2 and v3 configs
+and launchers remain available for exact rollback.
 
 Use one target image as the reference for one source image or a source folder:
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v3.server.yaml \
+  --config configs/custom_unpaired_reference_v4.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /absolute/path/to/source_images \
   --reference /absolute/path/to/target_reference.jpg \
@@ -190,8 +200,8 @@ The reference contributes global linear-RGB, CIE chromaticity, luminance, and
 contrast statistics; it does not copy the reference scene or subject. See the
 [Chinese custom unpaired guide](docs/custom_unpaired_training_zh.md#-参考图引导模式当前数据推荐)
 for the training loss, configuration rationale, and a same-source/different-reference
-comparison procedure. Prediction must use the same v3 YAML as training because
-the bounded-output parameters are configuration, not checkpoint state.
+comparison procedure. Prediction must use the same v4 YAML as training because
+the architecture and bounded-output parameters are selected by configuration.
 
 
 

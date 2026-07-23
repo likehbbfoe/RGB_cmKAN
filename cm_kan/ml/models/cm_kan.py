@@ -18,6 +18,7 @@ class CmKAN(torch.nn.Module):
         condition_dim=0,
         output_mode='legacy',
         max_logit_shift=1.5,
+        direct_conditioning=False,
     ):
         super(CmKAN, self).__init__()
 
@@ -36,7 +37,8 @@ class CmKAN(torch.nn.Module):
                          grid_range=grid_range,
                          condition_dim=condition_dim,
                          output_mode=output_mode,
-                         max_logit_shift=max_logit_shift))
+                         max_logit_shift=max_logit_shift,
+                         direct_conditioning=direct_conditioning))
 
         self.layers = nn.ModuleList(self.layers)
 
@@ -77,6 +79,7 @@ class LightCmKAN(torch.nn.Module):
         condition_dim=0,
         output_mode='legacy',
         max_logit_shift=1.5,
+        direct_conditioning=False,
     ):
         super(LightCmKAN, self).__init__()
 
@@ -95,7 +98,8 @@ class LightCmKAN(torch.nn.Module):
                          grid_range=grid_range,
                          condition_dim=condition_dim,
                          output_mode=output_mode,
-                         max_logit_shift=max_logit_shift))
+                         max_logit_shift=max_logit_shift,
+                         direct_conditioning=direct_conditioning))
 
         self.layers = nn.ModuleList(self.layers)
 

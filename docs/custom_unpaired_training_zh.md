@@ -546,13 +546,94 @@ pipeline:
 旧的 `configs/custom_unpaired_reference.server.yaml` 和
 `scripts/train_custom_unpaired_reference.sh` 仍完整保留，对应 v2，仅用于复现和回退。
 
+### v4：解除参考条件的恒等锁死
+
+v3 训练到 epoch 20 时，实测：
+
+```text
+ratio=0.9972
+luma_ratio=1.03
+```
+
+`luma_ratio=1.03` 表示生成图平均亮度只比 target 高约 3%，因此不是黑图或曝光
+塌陷；`ratio=0.9972` 则表示生成图到参考图的风格距离只缩短约 0.28%，实际仍与
+source 几乎相同。根因是原参考条件均值很小，且它需要先穿过零初始化的间接调制层，
+再穿过 KAN 的分阶段乘法结构，首步有效梯度过弱，cycle、identity 和颜色保护项很快
+把模型锁在恒等映射附近。
+
+v4 使用：
+
+```text
+condition = tanh(10 × (E(reference) - E(source)))
+```
+
+`tanh` 把条件平滑限制在 `(-1, 1)`，比硬裁剪更能保留大差异样本的梯度。新增的
+`style_direct` 把这个条件直接变成一组 KAN 参数偏移，并广播加到每个空间位置的
+参数图；原有上下文分支仍负责产生空间变化，因此不是把 target 的像素、人物或场景
+复制到 source。direct 权重和原 affine 输出头都从零开始，所以训练前输出仍是
+source，但 univariate/residual 参数行从第一步就能获得条件梯度。
+
+v4 使用独立实验和配置：
+
+```yaml
+experiment: custom_one_to_one_reference_color_v4_conditioned
+resume: false
+
+model:
+  params:
+    reference_condition_scale: 10.0
+    reference_direct_conditioning: true
+```
+
+启动命令：
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=7 \
+./scripts/train_custom_unpaired_reference_v4.sh
+```
+
+v4 必须从第 0 轮训练。默认 `reference_direct_conditioning: false` 的旧结构仍能严格
+加载 v3 checkpoint，但 v3 checkpoint 不能切换成 `true` 后续训 v4：两者参数集合和
+优化器状态不同。v2/v3 的 YAML 与启动脚本保留不动，随时可以回退。
+
+首轮零更新图仍应接近 source。epoch 1～5 重点运行
+`python scripts/report_reference_metrics.py`：
+
+- `direct` 和 `response` 应从 `0` 开始并逐渐大于 `0`；
+- `ratio` 应出现下降趋势，epoch 5 仍接近 `0.99～1.00` 时就停止，不必等 200 轮；
+- `luma_ratio` 应继续接近 `1`，`red_bad` 应继续接近 `0`。
+
+如果 direct 指标和 response 已增长但 ratio 仍不下降，说明参考分支已经有梯度，下一步
+应调整保护 loss 的相对权重，而不是继续放大 condition。
+
+服务器不能直接拉取仓库时，最省事的做法是覆盖整个 `cm_kan/` 文件夹，再额外复制：
+
+```text
+configs/custom_unpaired_reference_v4.server.yaml
+scripts/train_custom_unpaired_reference_v4.sh
+scripts/report_reference_metrics.py
+```
+
+若只能逐文件传输，v4 实际修改的运行文件是：
+
+```text
+cm_kan/core/config/model.py
+cm_kan/core/selector/model.py
+cm_kan/ml/layers/cm_kan/cm_kan.py
+cm_kan/ml/layers/cm_kan/generator.py
+cm_kan/ml/models/cm_kan.py
+cm_kan/ml/models/cycle_cm_kan.py
+cm_kan/ml/pipelines/unsupervised.py
+```
+
 ### 用一张参考图推理
 
 下面会把同一张参考图广播给输入目录中的所有 source 图片：
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v3.server.yaml \
+  --config configs/custom_unpaired_reference_v4.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /absolute/path/to/source_images \
   --reference /absolute/path/to/target_reference.jpg \
@@ -560,9 +641,9 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --batch_size 1
 ```
 
-推理必须使用训练这个 checkpoint 时的同一份 v3 YAML，尤其不能换成 v2 配置。
-`output_mode` 与 `max_logit_shift` 是配置行为，不会作为可恢复参数完整保存在
-checkpoint 权重中；配置不一致会改变输出范围与颜色变化幅度。
+推理必须使用训练这个 checkpoint 时的同一份 YAML。v4 checkpoint 必须搭配 v4
+YAML，不能换成 v2/v3 配置。`reference_direct_conditioning`、`output_mode` 与
+`max_logit_shift` 都是配置行为；配置不一致会改变模型结构、输出范围或颜色变化幅度。
 
 参考图片可以与 source 内容完全不同，建议选择曝光正常、白平衡和肤色风格明确、
 没有大面积纯黑或过曝区域的真实 target。`--input` 可以直接指向一张 source
@@ -574,12 +655,13 @@ checkpoint 权重中；配置不一致会改变输出范围与颜色变化幅度
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 \
-CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v3.server.yaml \
+CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v4.server.yaml \
 ./scripts/predict_reference_guided.sh /absolute/path/to/target_reference.jpg
 ```
 
 该推理封装脚本为了兼容旧 checkpoint，默认仍指向 v2 配置；使用 v3 checkpoint 时
-必须像上面一样指定 `CMKAN_CONFIG_PATH`，或者使用前面的完整 `main.py predict` 命令。
+必须显式传 v3 YAML，使用 v4 checkpoint 时则必须像上面一样显式传 v4 YAML；也可以
+直接使用前面的完整 `main.py predict` 命令。
 
 ### 同一 source 更换参考图的对照检验
 
@@ -588,7 +670,7 @@ CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v3.server.yaml \
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v3.server.yaml \
+  --config configs/custom_unpaired_reference_v4.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/warm_target.jpg \
@@ -596,7 +678,7 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --batch_size 1
 
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v3.server.yaml \
+  --config configs/custom_unpaired_reference_v4.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/cool_target.jpg \
@@ -674,6 +756,8 @@ python main.py train \
 | `training_mode` | 自定义非配对训练应为 `adversarial` |
 | `pretrained` | 从头训练时设为 `false` |
 | `model.type` | 普通模式为 `cycle_cm_kan`；参考图模式为 `reference_cycle_cm_kan` |
+| `model.params.reference_condition_scale` | v4 对参考风格差值的放大倍数，当前为 `10.0` |
+| `model.params.reference_direct_conditioning` | v4 是否启用参考条件到 KAN 参数图的直接路径 |
 | `adversarial_ramp_epochs` | warm-up 结束后把对抗权重线性增加到设定值所用轮数 |
 | `domain_statistics_weight` | 目标域 RGB 均值/标准差约束权重 |
 | `reference_style_weight` | 每张生成结果靠近本次参考图颜色统计的约束权重 |
@@ -691,8 +775,8 @@ python main.py train \
 | `patch_nce_temperature` | PatchNCE softmax 温度 |
 | `range_weight` | 超出 `[0, 1]` 的输出范围惩罚 |
 | `range_tail_weight` | 最严重少量越界像素的额外范围惩罚 |
-| `model.params.output_mode` | v3 使用 `bounded_logit_residual` 保证有效输出范围 |
-| `model.params.max_logit_shift` | v3 对 logit 空间颜色变化幅度的上限 |
+| `model.params.output_mode` | v3/v4 使用 `bounded_logit_residual` 保证有效输出范围 |
+| `model.params.max_logit_shift` | v3/v4 对 logit 空间颜色变化幅度的上限 |
 | `warmup_epochs` | 判别器启动前训练完整非对抗生成器目标的轮数，不是 identity-only |
 | `gradient_clip_val` | 生成器和判别器梯度裁剪阈值 |
 | `discriminator_lr_scale` | 判别器相对生成器的学习率比例 |
@@ -778,6 +862,13 @@ source/target 仍来自数据加载器给出的一对一样本，不会跨组重
 - `val_reference_style_ratio`（参考图模式；小于 `1` 表示生成图比原 source 更靠近参考图）
 - `val_reference_selection_loss`（参考稳定版最佳 checkpoint 的固定权重选择指标）
 - `val_fake_target_luminance_ratio`（fake target 平均亮度与真实 target 的比值，接近 `1` 最好）
+- `val_source_fake_l1`（正向生成图相对 source 的实际变化量）
+- `val_reference_response_l1`（同一 source 在真实参考条件与零参考条件下的输出差异）
+- `val_reference_condition_mean_abs`（放大并平滑限制后的参考条件平均绝对值）
+- `val_reference_direct_weight_rms`（双向生成器 direct 权重的整体 RMS）
+- `val_reference_direct_parameter_rms`（当前正向参考实际产生的 direct 参数 RMS）
+- `val_reference_affine_weight_rms`（双向生成器原 affine 输出头权重 RMS）
+- `val_reference_condition_saturation_fraction`（参考条件绝对值大于 `0.95` 的比例）
 - `val_reference_white_balance_loss`（生成图与两方向参考图的白平衡差异，越小越好）
 - `val_reference_local_chroma_loss`（扣除全局通道增益后的局部色度变化，越小越稳定）
 - `val_fake_target_local_chroma_mean`、`val_fake_target_local_chroma_tail`
@@ -809,8 +900,8 @@ python scripts/report_reference_metrics.py
 
 脚本只读取 `metrics.csv`，不读取图片、文件名或数据路径，并输出一行可以直接
 复制的汇总结果。默认路径是
-`experiments/custom_one_to_one_reference_color_v3_stable/logs/metrics.csv`；如果实验目录
-不同，可以把实际 CSV 路径作为第一个参数：
+`experiments/custom_one_to_one_reference_color_v4_conditioned/logs/metrics.csv`；如果
+实验目录不同，可以把实际 CSV 路径作为第一个参数：
 
 ```bash
 python scripts/report_reference_metrics.py /path/to/metrics.csv
@@ -818,15 +909,24 @@ python scripts/report_reference_metrics.py /path/to/metrics.csv
 
 默认只输出下面 6 个字段，之后把这一行发过来即可，不再需要手工复制全部 CSV 指标：
 
-- `selection`：`val_reference_selection_loss`，当前最佳 checkpoint 的固定权重选择分数，
-  越小越好；它不包含判别器分数。
 - `ratio`：生成图与参考图的风格距离相对迁移前 source 的比例，小于 `1` 才表示整体
   在向参考风格靠近。
+- `move`：fake target 与 source 的 L1 差异；它只能说明图像发生了变化。
+- `response`：使用真实参考条件与零参考条件时的输出差异，直接判断参考图是否真正
+  影响输出。
+- `direct`：当前正向参考实际产生的 direct KAN 参数 RMS；初始为 `0`，训练后应离开
+  `0`。
 - `luma_ratio`：fake target 与真实 target 的平均亮度比值；接近 `1` 最好，快速接近
   `0` 是黑图塌陷的直接信号。
-- `local_tail`：局部色度变化最严重区域的误差，越小越好。
-- `red_tail`：局部 `log(R/G)` 正向异常最严重区域的误差，专门观察局部变红。
 - `red_bad`：局部红色异常像素占比，越接近 `0` 越好。
+
+联合判读：
+
+- `move≈0、response≈0、ratio≈1`：仍锁在恒等映射。
+- `move>0、response≈0`：只是无条件漂移，没有响应参考图。
+- `response>0、ratio≈1`：参考图已经影响输出，但方向或强度还不正确。
+- `direct>0、response≈0`：direct 参数在学习，但下游作用仍被抑制。
+- `ratio` 下降、`response` 上升、`luma_ratio≈1`、`red_bad≈0`：期望状态。
 
 需要排查其他历史指标时再运行完整模式：
 
@@ -836,6 +936,10 @@ python scripts/report_reference_metrics.py --all
 
 完整报告中的旧字段含义如下：
 
+- `selection`：当前最佳 checkpoint 的固定权重选择分数，越小越好。
+- `direct_weight`、`affine_weight`：双向生成器两个条件分支权重的整体 RMS。
+- `condition`、`condition_saturation`：条件幅度及接近 `tanh` 边界的比例；饱和比例
+  过高时不要继续放大 condition。
 - `wb_loss`：两方向白平衡误差，越小越好。
 - `local_chroma`：扣除允许的全局通道增益后，局部相对颜色变化的两方向误差。
 - `rg_delta`：fake target 相对 target 的 `log(R/G)` 偏差；正值表示红相对绿更多。
@@ -851,11 +955,11 @@ python scripts/report_reference_metrics.py --all
   模型是否真正缩小了色温差。
 - `source_tint`、`source_tint_abs`：迁移前绿—洋红方向的对应基线。
 
-如果把旧 v1/v2/v6 CSV 路径传给脚本，因为旧日志没有 v3 安全指标，默认报告会将
-相应字段显示为 `NA`；v3 完成至少一次验证后就会出现数值。
+如果把旧 v1/v2/v3/v6 CSV 路径传给脚本，因为旧日志没有 v4 条件响应指标，默认报告
+会将相应字段显示为 `NA`；v4 完成至少一次验证后就会出现数值。
 
-只有确认当前 `custom_one_to_one_reference_color_v3_stable` 运行健康后，才可在意外中断时
-将配置改为：
+只有确认当前 `custom_one_to_one_reference_color_v4_conditioned` 运行健康后，才可在
+意外中断时将配置改为：
 
 ```yaml
 resume: true

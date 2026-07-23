@@ -38,6 +38,13 @@ def _write_metrics(path: Path) -> None:
         "val_fake_target_out_of_range_fraction",
         "val_reference_selection_loss",
         "val_fake_target_luminance_ratio",
+        "val_source_fake_l1",
+        "val_reference_response_l1",
+        "val_reference_condition_mean_abs",
+        "val_reference_direct_weight_rms",
+        "val_reference_direct_parameter_rms",
+        "val_reference_affine_weight_rms",
+        "val_reference_condition_saturation_fraction",
     ]
     rows = [
         {
@@ -75,6 +82,13 @@ def _write_metrics(path: Path) -> None:
             "val_fake_target_out_of_range_fraction": "0.0",
             "val_reference_selection_loss": "0.61",
             "val_fake_target_luminance_ratio": "0.96",
+            "val_source_fake_l1": "0.042",
+            "val_reference_response_l1": "0.036",
+            "val_reference_condition_mean_abs": "0.19",
+            "val_reference_direct_weight_rms": "0.014",
+            "val_reference_direct_parameter_rms": "0.021",
+            "val_reference_affine_weight_rms": "0.009",
+            "val_reference_condition_saturation_fraction": "0.01",
         },
     ]
     with path.open("w", newline="", encoding="utf-8") as metrics_file:
@@ -107,6 +121,11 @@ def test_summarize_metrics_uses_latest_validation_epoch(tmp_path: Path) -> None:
     assert summary["source_tint"] == -0.020
     assert summary["source_tint_abs"] == 0.025
     assert summary["target_luma"] == 0.49
+    assert summary["move"] == 0.042
+    assert summary["response"] == 0.036
+    assert summary["direct_weight"] == 0.014
+    assert summary["direct"] == 0.021
+    assert summary["affine_weight"] == 0.009
     assert format_summary(epoch, summary).startswith(
         "epoch=136 source_ref=0.030000 fake_ref=0.027000 ratio=0.900000"
     )
@@ -115,9 +134,9 @@ def test_summarize_metrics_uses_latest_validation_epoch(tmp_path: Path) -> None:
         summary,
         COMPACT_OUTPUT_METRICS,
     ) == (
-        "epoch=136 selection=0.610000 ratio=0.900000 "
-        "luma_ratio=0.960000 local_tail=0.031000 "
-        "red_tail=0.012000 red_bad=0.004000"
+        "epoch=136 ratio=0.900000 move=0.042000 "
+        "response=0.036000 direct=0.021000 "
+        "luma_ratio=0.960000 red_bad=0.004000"
     )
 
 
@@ -157,3 +176,8 @@ def test_summarize_metrics_keeps_new_metrics_optional_for_old_csv(
     assert "tint_abs=NA" in output
     assert "source_tint=NA" in output
     assert "source_tint_abs=NA" in output
+    assert summary["move"] is None
+    assert summary["response"] is None
+    assert summary["direct_weight"] is None
+    assert summary["direct"] is None
+    assert summary["affine_weight"] is None
