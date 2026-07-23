@@ -372,6 +372,10 @@ class GenerateCallback(Callback):
         dataloader = trainer.val_dataloaders
         self._capture_most_distinct_batch(dataloader, pl_module)
         self.save_dir = os.path.join(trainer.log_dir, "figures")
+        # Save a true zero-update baseline. The regular epoch-0 preview is
+        # written after one complete epoch and must not be mistaken for model
+        # initialization.
+        self._save_preview(trainer, pl_module, prefix="initial_")
 
     def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
         if trainer.current_epoch % self.every_n_epochs == 0:

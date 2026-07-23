@@ -14,17 +14,17 @@ from typing import Iterable, Mapping
 DEFAULT_METRICS_PATH = Path(
     os.environ.get(
         "CMKAN_METRICS_PATH",
-        "experiments/custom_one_to_one_reference_color_v3_safe/logs/metrics.csv",
+        "experiments/custom_one_to_one_reference_color_v3_stable/logs/metrics.csv",
     )
 )
 
 COMPACT_OUTPUT_METRICS = (
+    ("selection", "val_reference_selection_loss"),
     ("ratio", "val_reference_style_ratio"),
+    ("luma_ratio", "val_fake_target_luminance_ratio"),
     ("local_tail", "val_fake_target_local_chroma_tail"),
     ("red_tail", "val_fake_target_local_red_tail"),
     ("red_bad", "val_fake_target_local_red_bad_fraction"),
-    ("red_overshoot", "val_fake_target_red_overshoot_loss"),
-    ("out_of_range", "val_fake_target_out_of_range_fraction"),
 )
 
 LEGACY_OUTPUT_METRICS = (
@@ -51,6 +51,8 @@ LEGACY_OUTPUT_METRICS = (
 )
 
 SAFETY_OUTPUT_METRICS = (
+    ("selection", "val_reference_selection_loss"),
+    ("luma_ratio", "val_fake_target_luminance_ratio"),
     ("local_mean", "val_fake_target_local_chroma_mean"),
     ("local_tail", "val_fake_target_local_chroma_tail"),
     ("local_bad", "val_fake_target_local_chroma_bad_fraction"),

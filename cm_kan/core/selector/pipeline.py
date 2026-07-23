@@ -33,6 +33,9 @@ class PipelineSelector:
                     training_mode=config.pipeline.params.training_mode,
                     reverse_prediction=reverse_prediction,
                     adversarial_weight=config.pipeline.params.adversarial_weight,
+                    adversarial_ramp_epochs=(
+                        config.pipeline.params.adversarial_ramp_epochs
+                    ),
                     cycle_weight=config.pipeline.params.cycle_weight,
                     identity_weight=config.pipeline.params.identity_weight,
                     domain_statistics_weight=config.pipeline.params.domain_statistics_weight,

@@ -1,4 +1,5 @@
 import math
+from unittest.mock import Mock
 
 import torch
 
@@ -315,3 +316,36 @@ def test_white_balance_weight_ramps_by_absolute_epoch() -> None:
         for actual, target in zip(weights, expected)
     )
     assert UnsupervisedPipeline._ramped_weight(3.0, 0, 157) == 3.0
+
+
+def test_adversarial_weight_waits_for_warmup_then_ramps() -> None:
+    weights = [
+        UnsupervisedPipeline._ramped_adversarial_weight(
+            weight=1.0,
+            warmup_epochs=5,
+            ramp_epochs=10,
+            current_epoch=epoch,
+        )
+        for epoch in (0, 4, 5, 9, 14, 20)
+    ]
+
+    assert weights == [0.0, 0.0, 0.1, 0.5, 1.0, 1.0]
+
+
+def test_generator_warmup_uses_full_objective_without_adversarial_loss() -> None:
+    pipeline = UnsupervisedPipeline.__new__(UnsupervisedPipeline)
+    torch.nn.Module.__init__(pipeline)
+    expected_loss = torch.tensor(1.25, requires_grad=True)
+    pipeline.generator_training_step = Mock(return_value=expected_loss)
+    pipeline._log_loss = Mock()
+    source = torch.rand(2, 3, 8, 8)
+    target = torch.rand(2, 3, 8, 8)
+
+    loss = pipeline.generator_warmup_step(source, target)
+
+    assert loss is expected_loss
+    pipeline.generator_training_step.assert_called_once_with(
+        source,
+        target,
+        adversarial_weight=0.0,
+    )

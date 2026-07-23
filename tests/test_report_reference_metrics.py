@@ -36,6 +36,8 @@ def _write_metrics(path: Path) -> None:
         "val_fake_target_local_red_bad_fraction",
         "val_fake_target_red_overshoot_loss",
         "val_fake_target_out_of_range_fraction",
+        "val_reference_selection_loss",
+        "val_fake_target_luminance_ratio",
     ]
     rows = [
         {
@@ -71,6 +73,8 @@ def _write_metrics(path: Path) -> None:
             "val_fake_target_local_red_bad_fraction": "0.004",
             "val_fake_target_red_overshoot_loss": "0.002",
             "val_fake_target_out_of_range_fraction": "0.0",
+            "val_reference_selection_loss": "0.61",
+            "val_fake_target_luminance_ratio": "0.96",
         },
     ]
     with path.open("w", newline="", encoding="utf-8") as metrics_file:
@@ -111,9 +115,9 @@ def test_summarize_metrics_uses_latest_validation_epoch(tmp_path: Path) -> None:
         summary,
         COMPACT_OUTPUT_METRICS,
     ) == (
-        "epoch=136 ratio=0.900000 local_tail=0.031000 "
-        "red_tail=0.012000 red_bad=0.004000 red_overshoot=0.002000 "
-        "out_of_range=0.000000"
+        "epoch=136 selection=0.610000 ratio=0.900000 "
+        "luma_ratio=0.960000 local_tail=0.031000 "
+        "red_tail=0.012000 red_bad=0.004000"
     )
 
 

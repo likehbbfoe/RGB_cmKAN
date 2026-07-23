@@ -28,6 +28,7 @@ class UnsupervisedPipeline(L.LightningModule):
         training_mode: str = 'pretrain',
         reverse_prediction: bool = False,
         adversarial_weight: float = 1.0,
+        adversarial_ramp_epochs: int = 0,
         cycle_weight: float = 10.0,
         identity_weight: float = 5.0,
         domain_statistics_weight: float = 0.0,
@@ -62,6 +63,7 @@ class UnsupervisedPipeline(L.LightningModule):
         self.fake_pool_a = ImagePool()
         self.fake_pool_b = ImagePool()
         self.adversarial_weight = adversarial_weight
+        self.adversarial_ramp_epochs = adversarial_ramp_epochs
         self.cycle_weight = cycle_weight
         self.identity_weight = identity_weight
         self.domain_statistics_weight = domain_statistics_weight
@@ -279,6 +281,30 @@ class UnsupervisedPipeline(L.LightningModule):
         return self._ramped_weight(
             self.reference_white_balance_weight,
             self.reference_white_balance_ramp_epochs,
+            self.current_epoch,
+        )
+
+    @staticmethod
+    def _ramped_adversarial_weight(
+        weight,
+        warmup_epochs,
+        ramp_epochs,
+        current_epoch,
+    ):
+        """Delay GAN pressure, then introduce it gradually after warmup."""
+        if current_epoch < warmup_epochs:
+            return 0.0
+        if ramp_epochs <= 0:
+            return weight
+        adversarial_epoch = current_epoch - warmup_epochs + 1
+        progress = min(1.0, adversarial_epoch / ramp_epochs)
+        return weight * progress
+
+    def _effective_adversarial_weight(self):
+        return self._ramped_adversarial_weight(
+            self.adversarial_weight,
+            self.warmup_epochs,
+            self.adversarial_ramp_epochs,
             self.current_epoch,
         )
 
@@ -746,8 +772,18 @@ class UnsupervisedPipeline(L.LightningModule):
         pred = self.model.gen_ba(x, condition)
         return pred
     
-    def generator_training_step(self, imgA, imgB):
+    def generator_training_step(
+        self,
+        imgA,
+        imgB,
+        adversarial_weight=None,
+    ):
         """cycle images - using only generator nets"""
+        effectiveAdversarialWeight = (
+            self._effective_adversarial_weight()
+            if adversarial_weight is None
+            else adversarial_weight
+        )
         conditionB = self._style_condition(imgA, imgB)
         conditionA = self._style_condition(imgB, imgA)
         if self.patch_nce_weight > 0:
@@ -790,13 +826,15 @@ class UnsupervisedPipeline(L.LightningModule):
         sameB = self.model.gen_ab(imgB, self._style_condition(imgB, imgB))
         sameA = self.model.gen_ba(imgA, self._style_condition(imgA, imgA))
         
-        # generator gen_ab must fool discrim dis_b so label is real = 1
-        predFakeB = self.model.dis_b(fakeB)
-        adversarialB = self._disc_loss(predFakeB, 'real')
-        
-        # generator gen_ba must fool discrim dis_a so label is real
-        predFakeA = self.model.dis_a(fakeA)
-        adversarialA = self._disc_loss(predFakeA, 'real')
+        if effectiveAdversarialWeight > 0:
+            # gen_ab/gen_ba must fool their destination discriminators.
+            predFakeB = self.model.dis_b(fakeB)
+            adversarialB = self._disc_loss(predFakeB, 'real')
+            predFakeA = self.model.dis_a(fakeA)
+            adversarialA = self._disc_loss(predFakeA, 'real')
+        else:
+            adversarialA = fakeA.new_zeros(())
+            adversarialB = fakeB.new_zeros(())
         
         # compute extra losses
         identityA = self._identity_loss(sameA, imgA)
@@ -921,7 +959,7 @@ class UnsupervisedPipeline(L.LightningModule):
         # gather all losses
         adversarialLoss = adversarialA + adversarialB
         gen_loss = (
-            self.adversarial_weight * adversarialLoss
+            effectiveAdversarialWeight * adversarialLoss
             + self.cycle_weight * cycleLoss
             + self.identity_weight * identityLoss
             + self.domain_statistics_weight * statisticsLoss
@@ -950,6 +988,11 @@ class UnsupervisedPipeline(L.LightningModule):
 
         batch_size = imgA.shape[0]
         self._log_loss('gen_loss', gen_loss, batch_size, prog_bar=True)
+        self._log_loss(
+            'effective_adversarial_weight',
+            fakeB.new_tensor(effectiveAdversarialWeight),
+            batch_size,
+        )
         self._log_loss('gen_adversarial_a_loss', adversarialA, batch_size)
         self._log_loss('gen_adversarial_b_loss', adversarialB, batch_size)
         self._log_loss('gen_cycle_a_loss', cycleA, batch_size)
@@ -1098,34 +1141,11 @@ class UnsupervisedPipeline(L.LightningModule):
         return gen_loss
 
     def generator_warmup_step(self, imgA, imgB):
-        """Initialize both generators near identity before adversarial updates."""
-        if self.reference_guided:
-            sameB = self.model.gen_ab(
-                imgB,
-                self._style_condition(imgB, imgB),
-            )
-            sameA = self.model.gen_ba(
-                imgA,
-                self._style_condition(imgA, imgA),
-            )
-            warmup_loss = (
-                self._cycle_loss(sameB, imgB)
-                + self._cycle_loss(sameA, imgA)
-            )
-            self._log_loss(
-                'warmup_loss', warmup_loss, imgA.shape[0], prog_bar=True
-            )
-            return warmup_loss
-
-        fakeB = self.model.gen_ab(imgA)
-        fakeA = self.model.gen_ba(imgB)
-        sameB = self.model.gen_ab(imgB)
-        sameA = self.model.gen_ba(imgA)
-        warmup_loss = (
-            self._cycle_loss(fakeB, imgA)
-            + self._cycle_loss(fakeA, imgB)
-            + self._cycle_loss(sameB, imgB)
-            + self._cycle_loss(sameA, imgA)
+        """Learn the non-adversarial translation objective before GAN updates."""
+        warmup_loss = self.generator_training_step(
+            imgA,
+            imgB,
+            adversarial_weight=0.0,
         )
         self._log_loss(
             'warmup_loss', warmup_loss, imgA.shape[0], prog_bar=True
@@ -1333,9 +1353,12 @@ class UnsupervisedPipeline(L.LightningModule):
             fake_source_local_terms['red_tail']
             + fake_target_local_terms['red_tail']
         )
+        fake_target_red_overshoot_loss = (
+            self._reference_red_overshoot_loss(fake_target, target)
+        )
         reference_red_overshoot_loss = (
             self._reference_red_overshoot_loss(fake_source, source)
-            + self._reference_red_overshoot_loss(fake_target, target)
+            + fake_target_red_overshoot_loss
         )
         fake_source_range_terms = self._range_terms(
             fake_source,
@@ -1383,6 +1406,39 @@ class UnsupervisedPipeline(L.LightningModule):
             + self.range_weight * range_loss
             + self.range_tail_weight * range_tail_loss
         )
+        if self.reference_guided:
+            input_distance, fake_distance, distance_ratio = (
+                self._reference_style_distances(source, fake_target, target)
+            )
+            fake_target_luminance = self._luminance_mean(fake_target)
+            real_target_luminance = self._luminance_mean(target)
+            fake_target_luminance_error = (
+                fake_target_luminance - real_target_luminance
+            ).abs()
+            fake_target_luminance_ratio = (
+                fake_target_luminance
+                / real_target_luminance.clamp_min(1e-6)
+            )
+            # Fixed-weight checkpoint score. It deliberately excludes the
+            # discriminator because GAN scores change as D learns and are not
+            # comparable across the warmup/ramp/full-training phases.
+            reference_selection_loss = (
+                10.0 * fake_distance
+                + cycle_loss
+                + identity_loss
+                + reference_white_balance_loss
+                + 0.5 * reflectance_loss
+                + 0.25 * patch_nce_loss
+                + fake_target_local_terms['mean']
+                + fake_target_local_terms['chroma_tail']
+                + 2.0 * fake_target_local_terms['red_tail']
+                + fake_target_red_overshoot_loss
+                + 2.0 * fake_target_luminance_error
+                + (
+                    10.0
+                    * fake_target_range_terms['out_of_range_fraction']
+                )
+            )
         self.log(f'{stage}_cycle_loss', cycle_loss, prog_bar=False, logger=True)
         self.log(f'{stage}_identity_loss', identity_loss, prog_bar=False, logger=True)
         self.log(f'{stage}_adversarial_loss', adversarial_loss, prog_bar=False, logger=True)
@@ -1446,8 +1502,17 @@ class UnsupervisedPipeline(L.LightningModule):
             logger=True,
         )
         if self.reference_guided:
-            input_distance, fake_distance, distance_ratio = (
-                self._reference_style_distances(source, fake_target, target)
+            self.log(
+                f'{stage}_reference_selection_loss',
+                reference_selection_loss,
+                prog_bar=False,
+                logger=True,
+            )
+            self.log(
+                f'{stage}_fake_target_luminance_ratio',
+                fake_target_luminance_ratio,
+                prog_bar=False,
+                logger=True,
             )
             self.log(
                 f'{stage}_source_reference_style_distance',
@@ -1588,7 +1653,7 @@ class UnsupervisedPipeline(L.LightningModule):
             )
             self.log(
                 f'{stage}_fake_target_red_overshoot_loss',
-                self._reference_red_overshoot_loss(fake_target, target),
+                fake_target_red_overshoot_loss,
                 prog_bar=False,
                 logger=True,
             )
@@ -1656,7 +1721,6 @@ class UnsupervisedPipeline(L.LightningModule):
                 self.untoggle_optimizer(opt_gen)
                 if self.trainer.is_last_batch:
                     sch_gen.step()
-                    sch_disc.step()
                 return
             
             # train generator

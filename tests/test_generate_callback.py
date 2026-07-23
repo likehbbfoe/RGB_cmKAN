@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import torch
 
@@ -75,3 +76,31 @@ def test_scatter_tile_matches_preview_image_shape() -> None:
     assert preview.shape == (4, 3, 8, 8)
     assert preview[3].min().item() >= 0
     assert preview[3].max().item() <= 1
+
+
+def test_train_start_saves_a_true_zero_update_preview(tmp_path) -> None:
+    callback = GenerateCallback()
+    callback._capture_most_distinct_batch = Mock()
+    callback._save_preview = Mock()
+    trainer = SimpleNamespace(
+        val_dataloaders=object(),
+        log_dir=str(tmp_path),
+        current_epoch=0,
+    )
+    module = SimpleNamespace()
+
+    callback.on_train_start(trainer, module)
+
+    callback._capture_most_distinct_batch.assert_called_once_with(
+        trainer.val_dataloaders,
+        module,
+    )
+    callback._save_preview.assert_called_once_with(
+        trainer,
+        module,
+        prefix="initial_",
+    )
+
+    callback.on_train_epoch_end(trainer, module)
+
+    assert callback._save_preview.call_args_list[-1].kwargs["prefix"] == ""

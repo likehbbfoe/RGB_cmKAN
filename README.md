@@ -119,8 +119,9 @@ The scripts default to `/home/share/y50063074/data` and
 The loader recursively discovers common image formats. Training uses resize,
 random crop, and horizontal/vertical flip augmentation. Color-changing
 augmentation is omitted because it would alter the source and target color
-distributions. The custom configuration uses a short identity warm-up, gradient
-clipping, output-range regularization, differentiable color/exposure moments,
+distributions. The custom configuration supports a non-adversarial generator
+warm-up, gradient clipping, output-range regularization, differentiable
+color/exposure moments,
 intensity-invariant chromaticity consistency, and log-domain reflectance
 consistency. The last two terms keep subject color and local intrinsic contrast
 while still permitting smooth illumination changes. Optional scene-grouped sampling
@@ -153,11 +154,25 @@ CUDA_VISIBLE_DEVICES=7 \
 ```
 
 The server config starts a separate experiment named
-`custom_one_to_one_reference_color_v3_safe`, so existing v1/v2/v6 checkpoints and
-CSV logs are left untouched. Besides the neutral-pixel white-balance estimate, v3
-uses bounded logit-space residual output and explicit worst-region/red-overshoot
-penalties. These protect small face regions that can be hidden by an image-wide
-mean loss. The v2 config and launcher remain available for exact rollback.
+`custom_one_to_one_reference_color_v3_stable`, so existing v1/v2/v6 checkpoints
+and CSV logs are left untouched. This stability configuration trains for 200
+epochs; the earlier 50-epoch setting was only a safety pilot. It uses five
+epochs of the complete non-adversarial generator objective, then ramps the
+adversarial weight from `0.1` at epoch 5 to `1.0` at epoch 14. The generator
+learning rate is `1e-4`, the discriminator uses half that rate, exposure
+preservation has weight `2.0`, and the bounded logit shift is limited to `1.0`.
+Keep `resume: false` and do not resume a checkpoint that already produced black
+outputs.
+
+Before training updates, the callback saves
+`experiments/custom_one_to_one_reference_color_v3_stable/logs/figures/initial_source_to_target_0.png`;
+it should look like the source because the bounded residual head starts from
+identity. The sibling `source_to_target_0.png` is saved after the first complete
+warm-up epoch. Reference-guided best checkpoints monitor
+`val_reference_selection_loss`, which excludes the changing discriminator
+score. The CSV also records
+`val_fake_target_luminance_ratio` and `effective_adversarial_weight`.
+The v2 config and launcher remain available for exact rollback.
 
 Use one target image as the reference for one source image or a source folder:
 
@@ -175,7 +190,8 @@ The reference contributes global linear-RGB, CIE chromaticity, luminance, and
 contrast statistics; it does not copy the reference scene or subject. See the
 [Chinese custom unpaired guide](docs/custom_unpaired_training_zh.md#-参考图引导模式当前数据推荐)
 for the training loss, configuration rationale, and a same-source/different-reference
-comparison procedure.
+comparison procedure. Prediction must use the same v3 YAML as training because
+the bounded-output parameters are configuration, not checkpoint state.
 
 
 

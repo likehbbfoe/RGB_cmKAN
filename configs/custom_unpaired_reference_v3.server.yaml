@@ -1,4 +1,4 @@
-experiment: custom_one_to_one_reference_color_v3_safe
+experiment: custom_one_to_one_reference_color_v3_stable
 save_dir: experiments
 resume: false
 accelerator: gpu
@@ -17,7 +17,7 @@ model:
       - 0.0
       - 1.0
     output_mode: bounded_logit_residual
-    max_logit_shift: 1.5
+    max_logit_shift: 1.0
 
 data:
   type: custom_unpaired
@@ -42,22 +42,23 @@ pipeline:
   type: unsupervised
   params:
     optimizer: adam
-    lr: 0.0002
+    lr: 0.0001
     weight_decay: 0.0
     batch_size: 8
     val_batch_size: 1
     test_batch_size: 1
-    epochs: 50
+    epochs: 200
     save_freq: 1
     visualize_freq: 1
     training_mode: adversarial
     pretrained: false
     pretrained_model: null
     adversarial_weight: 1.0
+    adversarial_ramp_epochs: 10
     cycle_weight: 5.0
     identity_weight: 2.0
     domain_statistics_weight: 0.0
-    exposure_weight: 0.0
+    exposure_weight: 2.0
     chroma_weight: 0.0
     reflectance_weight: 0.5
     patch_nce_weight: 0.25
@@ -78,6 +79,6 @@ pipeline:
     range_weight: 1.0
     range_tail_weight: 0.25
     range_tail_fraction: 0.01
-    warmup_epochs: 0
+    warmup_epochs: 5
     gradient_clip_val: 1.0
-    discriminator_lr_scale: 1.0
+    discriminator_lr_scale: 0.5

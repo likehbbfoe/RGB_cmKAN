@@ -8,6 +8,7 @@ from ..core.selector import (
 )
 from ..core.config import Config
 from ..core.config.data import DataType
+from ..core.config.model import ModelType
 import lightning as L
 import os
 from lightning.pytorch.callbacks import (
@@ -91,12 +92,20 @@ def train(args: argparse.Namespace) -> None:
     )
 
     is_custom_unpaired = config.data.type == DataType.custom_unpaired
-    checkpoint_monitor = 'val_loss' if is_custom_unpaired else 'val_de'
-    checkpoint_filename = (
-        "{epoch}-{val_loss:.4f}"
-        if is_custom_unpaired
-        else "{epoch}-{val_de:.2f}"
+    is_reference_guided = (
+        config.model.type == ModelType.reference_cycle_cm_kan
     )
+    if is_reference_guided:
+        checkpoint_monitor = 'val_reference_selection_loss'
+        checkpoint_filename = (
+            "{epoch}-{val_reference_selection_loss:.4f}"
+        )
+    elif is_custom_unpaired:
+        checkpoint_monitor = 'val_loss'
+        checkpoint_filename = "{epoch}-{val_loss:.4f}"
+    else:
+        checkpoint_monitor = 'val_de'
+        checkpoint_filename = "{epoch}-{val_de:.2f}"
 
     trainer = L.Trainer(
         logger=logger,

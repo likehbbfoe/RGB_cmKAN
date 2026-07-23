@@ -38,6 +38,7 @@ class UnsupervisedPipelineParams(DefaultPipelineParams):
     pretrained_model: Optional[str]
     training_mode: UnsupervisedTrainingMode = UnsupervisedTrainingMode.pretrain
     adversarial_weight: float = Field(default=1.0, ge=0)
+    adversarial_ramp_epochs: int = Field(default=0, ge=0)
     cycle_weight: float = Field(default=10.0, ge=0)
     identity_weight: float = Field(default=5.0, ge=0)
     domain_statistics_weight: float = Field(default=0.0, ge=0)
