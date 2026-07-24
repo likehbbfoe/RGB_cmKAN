@@ -13,6 +13,12 @@ class DataType(str, Enum):
     custom_unpaired = 'custom_unpaired'
 
 
+class PairingMode(str, Enum):
+    random = 'random'
+    weak_aligned = 'weak_aligned'
+    one_to_one = 'one_to_one'
+
+
 class DataPathes(BaseModel):
     source: str
     target: str
@@ -27,6 +33,9 @@ class CustomUnpairedDataParams(BaseModel):
     vertical_flip_probability: float = Field(default=0.0, ge=0, le=1)
     num_workers: int = Field(default=4, ge=0)
     recursive: bool = True
+    pair_by_subdirectory: bool = False
+    pairing_mode: PairingMode = PairingMode.random
+    face_mask_root: Optional[str] = None
     seed: int = 42
     image_extensions: Tuple[str, ...] = (
         ".png",

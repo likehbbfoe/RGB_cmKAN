@@ -1,5 +1,5 @@
 experiment: volga2k_paired
-save_dir: experiments
+save_dir: ../experiment
 resume: True
 accelerator: 'gpu'
 

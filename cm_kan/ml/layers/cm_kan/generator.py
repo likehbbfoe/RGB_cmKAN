@@ -222,13 +222,42 @@ class GeneratorLayer(torch.nn.Module):
     sepconv replace conv_out to reduce GFLOPS
     """
 
-    def __init__(self, in_channels, out_channels):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        condition_dim=0,
+        direct_conditioning=False,
+    ):
         super().__init__()
 
         MID_CHANNELS = 21 * in_channels
+        self.feature_channels = MID_CHANNELS
+        self.condition_dim = condition_dim
+        self.direct_conditioning = bool(direct_conditioning)
+        if self.direct_conditioning and condition_dim <= 0:
+            raise ValueError(
+                "direct_conditioning requires a positive condition_dim"
+            )
         self.encoder = Encoder2D(in_channels, MID_CHANNELS, 3)
 
         self.norm1 = LayerNorm(MID_CHANNELS)
+        self.style_affine = None
+        self.style_direct = None
+        if condition_dim > 0:
+            hidden_dim = max(32, condition_dim * 4)
+            self.style_affine = nn.Sequential(
+                nn.Linear(condition_dim, hidden_dim),
+                nn.SiLU(),
+                nn.Linear(hidden_dim, MID_CHANNELS * 2),
+            )
+            if self.direct_conditioning:
+                self.style_direct = nn.Linear(
+                    condition_dim,
+                    out_channels,
+                    bias=False,
+                )
+            self.reset_reference_conditioning()
 
         N = 128
         self.basis = nn.Parameter(torch.rand(1, MID_CHANNELS, N))
@@ -241,17 +270,82 @@ class GeneratorLayer(torch.nn.Module):
 
         self.conv_reproj = FFN(in_features=MID_CHANNELS, out_features=out_channels)
 
-    def forward(self, x:torch.Tensor):
+    def reset_reference_conditioning(self) -> None:
+        """Keep identity initialization while making reference gradients usable."""
+        if self.style_affine is None:
+            return
+        if self.style_direct is not None:
+            nn.init.xavier_uniform_(self.style_affine[0].weight)
+            nn.init.zeros_(self.style_affine[0].bias)
+            nn.init.zeros_(self.style_direct.weight)
+        nn.init.zeros_(self.style_affine[-1].weight)
+        nn.init.zeros_(self.style_affine[-1].bias)
 
-        B, C, H, W = x.shape
+    def encode(
+        self,
+        x: torch.Tensor,
+        condition: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return the contextual feature map used to predict spatial KAN weights."""
+        return self.norm1(self.encoder(x))
 
-        # forward projection
-        x = self.encoder(x)
+    def _apply_style_condition(
+        self,
+        features: torch.Tensor,
+        condition: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.style_affine is None:
+            return features
+        self._validate_style_condition(condition, features.shape[0])
+        gamma, beta = self.style_affine(condition).chunk(2, dim=1)
+        gamma = gamma[:, :, None, None]
+        beta = beta[:, :, None, None]
+        return features * (1 + gamma) + beta
 
-        x = self.norm1(x)
+    def _apply_direct_style_condition(
+        self,
+        parameters: torch.Tensor,
+        condition: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.style_direct is None:
+            return parameters
+        direct_parameters = self.style_direct(condition)
+        # The reference supplies a per-image baseline while the contextual
+        # branch above retains the spatial variation of the full parameter map.
+        return parameters + direct_parameters[:, :, None, None]
+
+    def _validate_style_condition(
+        self,
+        condition: torch.Tensor | None,
+        batch_size: int,
+    ) -> None:
+        if self.style_affine is None:
+            return
+        if condition is None:
+            raise ValueError("A reference style condition is required")
+        if condition.ndim != 2 or condition.shape != (
+            batch_size,
+            self.condition_dim,
+        ):
+            raise ValueError(
+                "Reference style condition must have shape "
+                f"({batch_size}, {self.condition_dim}), got {condition.shape}"
+            )
+
+    def forward_with_features(
+        self,
+        x: torch.Tensor,
+        condition: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        _, _, H, W = x.shape
+        self._validate_style_condition(condition, x.shape[0])
+
+        # Forward projection. These contextual features are also exposed for
+        # PatchNCE so translation can preserve corresponding input content.
+        features = self.encode(x, condition)
 
         # basis coeff
-        q = self.q(x)
+        q = self.q(features)
         k = self.k(self.basis)
         v = self.v(self.basis)
 
@@ -268,10 +362,20 @@ class GeneratorLayer(torch.nn.Module):
         y = rearrange(y, 'b c (h w) -> b c h w', h=H, w=W)
 
         # back projection
-        x = self.norm2(y)
-        x = self.conv_reproj(x)
+        output = self.norm2(y)
+        output = self._apply_style_condition(output, condition)
+        output = self.conv_reproj(output)
+        output = self._apply_direct_style_condition(output, condition)
 
-        return x
+        return output, features
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        condition: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        output, _ = self.forward_with_features(x, condition)
+        return output
 
 
 class LightEncoder2D(torch.nn.Module):
@@ -317,13 +421,42 @@ class LightGeneratorLayer(torch.nn.Module):
     sepconv replace conv_out to reduce GFLOPS
     """
 
-    def __init__(self, in_channels, out_channels):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        condition_dim=0,
+        direct_conditioning=False,
+    ):
         super().__init__()
 
         MID_CHANNELS = 3+12
+        self.feature_channels = MID_CHANNELS
+        self.condition_dim = condition_dim
+        self.direct_conditioning = bool(direct_conditioning)
+        if self.direct_conditioning and condition_dim <= 0:
+            raise ValueError(
+                "direct_conditioning requires a positive condition_dim"
+            )
         self.encoder = LightEncoder2D(in_channels, MID_CHANNELS, 3)
 
         self.norm1 = LayerNorm(MID_CHANNELS)
+        self.style_affine = None
+        self.style_direct = None
+        if condition_dim > 0:
+            hidden_dim = max(32, condition_dim * 4)
+            self.style_affine = nn.Sequential(
+                nn.Linear(condition_dim, hidden_dim),
+                nn.SiLU(),
+                nn.Linear(hidden_dim, MID_CHANNELS * 2),
+            )
+            if self.direct_conditioning:
+                self.style_direct = nn.Linear(
+                    condition_dim,
+                    out_channels,
+                    bias=False,
+                )
+            self.reset_reference_conditioning()
 
         N = 30
         self.basis = nn.Parameter(torch.rand(1, MID_CHANNELS, N))
@@ -336,17 +469,81 @@ class LightGeneratorLayer(torch.nn.Module):
 
         self.conv_reproj = FFN(in_features=MID_CHANNELS, out_features=out_channels)
 
-    def forward(self, x:torch.Tensor):
+    def reset_reference_conditioning(self) -> None:
+        """Keep identity initialization while making reference gradients usable."""
+        if self.style_affine is None:
+            return
+        if self.style_direct is not None:
+            nn.init.xavier_uniform_(self.style_affine[0].weight)
+            nn.init.zeros_(self.style_affine[0].bias)
+            nn.init.zeros_(self.style_direct.weight)
+        nn.init.zeros_(self.style_affine[-1].weight)
+        nn.init.zeros_(self.style_affine[-1].bias)
 
-        B, C, H, W = x.shape
+    def encode(
+        self,
+        x: torch.Tensor,
+        condition: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return the contextual feature map used to predict spatial KAN weights."""
+        return self.norm1(self.encoder(x))
 
-        # forward projection
-        x = self.encoder(x)
+    def _apply_style_condition(
+        self,
+        features: torch.Tensor,
+        condition: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.style_affine is None:
+            return features
+        self._validate_style_condition(condition, features.shape[0])
+        gamma, beta = self.style_affine(condition).chunk(2, dim=1)
+        gamma = gamma[:, :, None, None]
+        beta = beta[:, :, None, None]
+        return features * (1 + gamma) + beta
 
-        x = self.norm1(x)
+    def _apply_direct_style_condition(
+        self,
+        parameters: torch.Tensor,
+        condition: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.style_direct is None:
+            return parameters
+        direct_parameters = self.style_direct(condition)
+        # The reference supplies a per-image baseline while the contextual
+        # branch above retains the spatial variation of the full parameter map.
+        return parameters + direct_parameters[:, :, None, None]
+
+    def _validate_style_condition(
+        self,
+        condition: torch.Tensor | None,
+        batch_size: int,
+    ) -> None:
+        if self.style_affine is None:
+            return
+        if condition is None:
+            raise ValueError("A reference style condition is required")
+        if condition.ndim != 2 or condition.shape != (
+            batch_size,
+            self.condition_dim,
+        ):
+            raise ValueError(
+                "Reference style condition must have shape "
+                f"({batch_size}, {self.condition_dim}), got {condition.shape}"
+            )
+
+    def forward_with_features(
+        self,
+        x: torch.Tensor,
+        condition: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        _, _, H, W = x.shape
+        self._validate_style_condition(condition, x.shape[0])
+
+        # Forward projection
+        features = self.encode(x, condition)
 
         # basis coeff
-        q = self.q(x)
+        q = self.q(features)
         k = self.k(self.basis)
         v = self.v(self.basis)
 
@@ -363,7 +560,17 @@ class LightGeneratorLayer(torch.nn.Module):
         y = rearrange(y, 'b c (h w) -> b c h w', h=H, w=W)
 
         # back projection
-        x = self.norm2(y)
-        x = self.conv_reproj(x)
+        output = self.norm2(y)
+        output = self._apply_style_condition(output, condition)
+        output = self.conv_reproj(output)
+        output = self._apply_direct_style_condition(output, condition)
 
-        return x
+        return output, features
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        condition: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        output, _ = self.forward_with_features(x, condition)
+        return output

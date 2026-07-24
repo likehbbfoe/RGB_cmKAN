@@ -1,5 +1,5 @@
 experiment: five_k_supervised
-save_dir: experiments
+save_dir: ../experiment
 resume: True
 accelerator: 'gpu'
 

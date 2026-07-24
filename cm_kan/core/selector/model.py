@@ -5,6 +5,7 @@ from cm_kan.ml.models import (
     CmKAN,
     LightCmKAN,
     CycleCmKAN,
+    ReferenceCycleCmKAN,
 )
 
 
@@ -18,7 +19,9 @@ class ModelSelector:
                     grid_size=config.model.params.grid_size,
                     spline_order=config.model.params.spline_order,
                     residual_std=config.model.params.residual_std,
-                    grid_range=config.model.params.grid_range
+                    grid_range=config.model.params.grid_range,
+                    output_mode=config.model.params.output_mode,
+                    max_logit_shift=config.model.params.max_logit_shift,
                 )
             case ModelType.light_cm_kan:
                 return LightCmKAN(
@@ -27,7 +30,9 @@ class ModelSelector:
                     grid_size=config.model.params.grid_size,
                     spline_order=config.model.params.spline_order,
                     residual_std=config.model.params.residual_std,
-                    grid_range=config.model.params.grid_range
+                    grid_range=config.model.params.grid_range,
+                    output_mode=config.model.params.output_mode,
+                    max_logit_shift=config.model.params.max_logit_shift,
                 )
             case ModelType.cycle_cm_kan:
                 return CycleCmKAN(
@@ -37,6 +42,25 @@ class ModelSelector:
                     spline_order=config.model.params.spline_order,
                     residual_std=config.model.params.residual_std,
                     grid_range=config.model.params.grid_range,
+                    output_mode=config.model.params.output_mode,
+                    max_logit_shift=config.model.params.max_logit_shift,
+                )
+            case ModelType.reference_cycle_cm_kan:
+                return ReferenceCycleCmKAN(
+                    in_dims=config.model.params.in_dims,
+                    out_dims=config.model.params.out_dims,
+                    grid_size=config.model.params.grid_size,
+                    spline_order=config.model.params.spline_order,
+                    residual_std=config.model.params.residual_std,
+                    grid_range=config.model.params.grid_range,
+                    output_mode=config.model.params.output_mode,
+                    max_logit_shift=config.model.params.max_logit_shift,
+                    reference_condition_scale=(
+                        config.model.params.reference_condition_scale
+                    ),
+                    reference_direct_conditioning=(
+                        config.model.params.reference_direct_conditioning
+                    ),
                 )
             case _:
                 raise ValueError(f'Unupported model type f{config.model.type}')

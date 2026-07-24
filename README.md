@@ -94,11 +94,190 @@ does not mix in a sibling `recolor/` directory. An existing validation split is
 used directly; only datasets without `val/` fall back to automatic splitting.
 If `test/` is absent, test-time evaluation reuses `val/`.
 
+After training, run loss evaluation and generate full-resolution predictions in
+both directions with one command:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh
+```
+
+The script passes `--reverse` as a flag (without a trailing `1`), writes test
+metrics separately from the training CSV, and saves both translation directions
+under `../experiment/results/custom_unpaired/` by default.
+
+For privacy-safe debugging without sharing images or filenames, print aggregate
+brightness, contrast, clipping, and RGB statistics:
+
+```bash
+python scripts/diagnose_prediction_stats.py
+```
+
+The scripts default to `/home/share/y50063074/data` and
+`../experiment/results/custom_unpaired`. Override them with `CMKAN_DATA_ROOT` and
+`CMKAN_RESULTS_ROOT` or the existing command-line arguments.
+
+All supplied configurations use `save_dir: ../experiment`. Start commands from
+the repository root (the shell launchers do this automatically). Training,
+validation, testing, prediction logs, checkpoints, figures, and default exported
+predictions then stay outside the repository:
+
+```text
+../experiment/
+├── <experiment>/
+│   ├── logs/
+│   ├── test_logs/
+│   ├── predict_logs/
+│   └── predictions/
+└── results/
+```
+
+This makes replacing the repository directory safe without replacing the
+sibling `experiment/` directory. Existing files under the legacy in-repository
+`experiments/` directory are not moved automatically.
+
 The loader recursively discovers common image formats. Training uses resize,
 random crop, and horizontal/vertical flip augmentation. Color-changing
 augmentation is omitted because it would alter the source and target color
-distributions. Adjust image size, split ratios, batch size, and training length in
+distributions. The custom configuration supports a non-adversarial generator
+warm-up, gradient clipping, output-range regularization, differentiable
+color/exposure moments,
+intensity-invariant chromaticity consistency, and log-domain reflectance
+consistency. The last two terms keep subject color and local intrinsic contrast
+while still permitting smooth illumination changes. Optional scene-grouped sampling
+restricts source/target matching to corresponding relative subdirectories.
+`pairing_mode: weak_aligned` additionally creates a fixed rough correspondence,
+including unequal domain sizes. `pairing_mode: one_to_one` requires a bijection:
+each source uses exactly one target and no target is repeated or dropped. Both
+aligned modes synchronize geometric augmentation while still avoiding pixel losses
+on imperfectly aligned pairs. PatchNCE compares cmKAN contextual patches between
+each input and its own translation to preserve content.
+Adjust image size, split ratios, batch size, and training length in
 `configs/custom_unpaired.example.yaml`.
+
+### Reference-guided unpaired color transfer
+
+When the target domain contains several color temperatures or exposure styles,
+use the reference-guided model so each translation follows one selected target
+image instead of collapsing to an average target look. The dataset layout stays
+the same. The supplied reference configs use strict one-to-one sampling: a complete
+relative-filename correspondence is used when available; otherwise each matching
+scene directory is naturally sorted and zipped. Counts must match globally and in
+every scene directory, so a target can never be silently reused.
+
+Reference-guided checkpoints contain additional conditioning layers. When faces
+appear against beige, yellow, wood, or other skin-like backgrounds, use the v6
+face-ROI run. It intersects the v5 color candidate with a precomputed face mask,
+so background color cannot occupy most of the skin objective.
+
+Generate the private sidecar masks on the training server:
+
+```bash
+python scripts/generate_face_masks.py
+```
+
+This command is safe on a headless server: it never opens a window, prints
+aggregate progress every 25 images, and writes the preview PNG only after mask
+generation finishes. Preview selection uses statistics cached during generation
+and re-reads only the selected 30 images. An interrupted run can be restarted
+without overwriting completed or manually corrected masks.
+
+Inspect `/home/share/y50063074/data_face_masks/face_mask_preview.png` before
+training. Its third column is the actual `face ROI × skin color` mask used by
+the loss; white must cover facial skin rather than the surrounding background.
+The mask tree mirrors the dataset tree, and every image must have a `.png`
+sidecar:
+
+```text
+/home/share/y50063074/data_face_masks/
+├── train/
+│   ├── source/
+│   └── target/
+└── val/
+    ├── source/
+    └── target/
+```
+
+A missing sidecar stops immediately instead of silently falling back to the v5
+color-only heuristic. A present but completely black mask means no reliable
+face was detected; that sample still trains with the other objectives, but
+contributes nothing to the skin loss.
+
+After checking the preview, start a fresh v8 environment-color experiment:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=7 \
+./scripts/train_custom_unpaired_reference_v8_environment.sh
+```
+
+The launcher stops early with an installation hint if it detects the known
+Lightning 2.1.x and Rich 14+ progress-bar incompatibility. The server config
+starts a separate experiment named
+`custom_one_to_one_reference_color_v8_environment`, so all v1–v7 checkpoints
+and CSV logs are left untouched.
+
+v4 scales the reference style delta by 10 and adds a zero-initialized direct path
+from that condition to the spatial KAN parameter tensor. v5 keeps that path,
+restores the safe global style weight to `3`, and adds target-relative skin-tone
+statistics and local red guards. v6 keeps those weights and protections, but
+restricts the source and target color masks to their corresponding face ROIs.
+It still compares color statistics rather than facial pixels, so it does not
+copy the target person's features or texture. Conservative validity gates also
+skip ROIs that are too small/large, nearly uniform skin color, or more than 2×
+different in source/target area, as well as pairs whose face centers are far
+apart. v7 keeps the v6 model and safety losses unchanged, but changes the upper
+face-skin-density gate from `0.90` to `1.0`. The old ceiling rejected most
+otherwise valid, tightly cropped face ROIs in the measured dataset.
+
+v8 keeps the v7 face and red-overshoot protection, then uses the one-to-one
+relationship for environment color. It excludes a dilated face ROI and compares
+weighted color moments in `1×1`, `2×2`, and `4×4` grids. This supervises
+whole-frame color temperature and coarse regional rendering without applying
+pixel L1/SSIM to slightly misaligned people. “Environment” means the non-face
+region here; clothing, body, hands, and other foreground outside the face still
+contribute. v8 lowers source-preserving exposure weight from `2.0` to `0.5` and
+raises reference style weight from `3.0` to `5.0`. Crop size remains 256 so this
+run isolates the new supervision from a resolution change.
+
+The v8 stability configuration trains for 200 epochs. It uses five epochs of
+the complete non-adversarial generator objective, then ramps the adversarial
+weight from `0.1` at epoch 5 to `1.0` at epoch 14. Keep `resume: false`; do not
+resume a v7 or older checkpoint. Geometric augmentation applies the same resize,
+crop, and flip to each image and its sidecar mask.
+
+Before training updates, the callback saves
+`../experiment/custom_one_to_one_reference_color_v8_environment/logs/figures/initial_source_to_target_0.png`;
+it should look like the source because the bounded residual head starts from
+identity. Reference-guided best checkpoints monitor
+`val_reference_selection_loss`, which now includes forward environment error.
+Run `python scripts/report_reference_metrics.py --environment` for environment
+color and `python scripts/report_reference_metrics.py --skin` for skin. During
+epochs 1–5, `response` and `direct` should leave zero and `skin_valid` must be
+non-zero. `env_ratio < 1` means the generated non-face region is closer to its
+paired target than the original source is. A black face mask only lowers the
+number of valid skin samples; it does not disable adversarial, cycle, identity,
+exposure, reflectance, or PatchNCE training. The v1–v7 configs remain available
+for exact rollback.
+
+Use one target image as the reference for one source image or a source folder:
+
+```bash
+CUDA_VISIBLE_DEVICES=7 python main.py predict \
+  --config configs/custom_unpaired_reference_v8_environment.server.yaml \
+  --weights logs/checkpoints/last.ckpt \
+  --input /absolute/path/to/source_images \
+  --reference /absolute/path/to/target_reference.jpg \
+  --output ../experiment/results/reference_guided \
+  --batch_size 1
+```
+
+If `--output` is omitted, `predict` writes images to
+`../experiment/<experiment>/predictions/`.
+
+The reference contributes global color and exposure statistics; it does not
+copy the reference scene or subject. See the
+[Chinese custom unpaired guide](docs/custom_unpaired_training_zh.md#-参考图引导模式当前数据推荐)
+for the complete mask checks and training procedure. Prediction must use the
+same v8 YAML as training.
 
 
 

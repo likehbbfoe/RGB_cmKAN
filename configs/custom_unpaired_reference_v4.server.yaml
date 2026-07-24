@@ -1,0 +1,86 @@
+experiment: custom_one_to_one_reference_color_v4_conditioned
+save_dir: ../experiment
+resume: false
+accelerator: gpu
+
+model:
+  type: reference_cycle_cm_kan
+  params:
+    in_dims:
+      - 3
+    out_dims:
+      - 3
+    grid_size: 5
+    spline_order: 3
+    residual_std: 0.1
+    grid_range:
+      - 0.0
+      - 1.0
+    output_mode: bounded_logit_residual
+    max_logit_shift: 1.0
+    reference_condition_scale: 10.0
+    reference_direct_conditioning: true
+
+data:
+  type: custom_unpaired
+  train:
+    source: /home/share/y50063074/data/train/source
+    target: /home/share/y50063074/data/train/target
+  val:
+    source: /home/share/y50063074/data/val/source
+    target: /home/share/y50063074/data/val/target
+  params:
+    crop_size: 256
+    resize_size: 286
+    horizontal_flip_probability: 0.5
+    vertical_flip_probability: 0.0
+    num_workers: 4
+    recursive: true
+    pair_by_subdirectory: true
+    pairing_mode: one_to_one
+    seed: 42
+
+pipeline:
+  type: unsupervised
+  params:
+    optimizer: adam
+    lr: 0.0001
+    weight_decay: 0.0
+    batch_size: 8
+    val_batch_size: 1
+    test_batch_size: 1
+    epochs: 200
+    save_freq: 1
+    visualize_freq: 1
+    training_mode: adversarial
+    pretrained: false
+    pretrained_model: null
+    adversarial_weight: 1.0
+    adversarial_ramp_epochs: 10
+    cycle_weight: 5.0
+    identity_weight: 2.0
+    domain_statistics_weight: 0.0
+    exposure_weight: 2.0
+    chroma_weight: 0.0
+    reflectance_weight: 0.5
+    patch_nce_weight: 0.25
+    patch_nce_num_patches: 256
+    patch_nce_temperature: 0.07
+    reference_style_weight: 3.0
+    reference_white_balance_weight: 1.0
+    reference_white_balance_ramp_epochs: 5
+    reference_local_chroma_weight: 0.25
+    reference_local_chroma_tail_weight: 0.25
+    reference_local_chroma_tail_fraction: 0.05
+    reference_local_chroma_threshold: 0.25
+    reference_local_red_tail_weight: 0.5
+    reference_local_red_tail_fraction: 0.02
+    reference_local_red_threshold: 0.1823215568
+    reference_red_overshoot_weight: 0.5
+    reference_red_overshoot_margin: 0.02
+    range_weight: 1.0
+    range_tail_weight: 0.25
+    range_tail_fraction: 0.01
+    warmup_epochs: 5
+    gradient_clip_val: 1.0
+    discriminator_lr_scale: 0.5

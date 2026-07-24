@@ -19,6 +19,8 @@ from lightning.pytorch.callbacks import (
 from cm_kan.ml.callbacks import GenerateCallback
 from lightning.pytorch.loggers import CSVLogger
 from cm_kan import cli
+from .custom_unpaired import override_data_root, override_face_mask_root
+from .experiment_paths import experiment_directory
 
 
 def add_parser(subparser: argparse) -> None:
@@ -47,6 +49,30 @@ def add_parser(subparser: argparse) -> None:
         help="Reverse the direction of color transfer (for unpaired scenario only)",
         required=False,
     )
+    parser.add_argument(
+        "--data-root",
+        type=str,
+        help="Override custom dataset root containing train/, val/, and optional test/",
+        default=None,
+    )
+    parser.add_argument(
+        "--source-domain",
+        type=str,
+        help="Source-domain directory name below each split",
+        default="source",
+    )
+    parser.add_argument(
+        "--target-domain",
+        type=str,
+        help="Target-domain directory name below each split",
+        default="target",
+    )
+    parser.add_argument(
+        "--face-mask-root",
+        type=str,
+        help="Override mirrored face-mask sidecar root for custom data",
+        default=None,
+    )
 
     parser.set_defaults(func=test)
 
@@ -56,26 +82,41 @@ def test(args: argparse.Namespace) -> None:
     with open(args.config, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
+    if args.data_root is not None:
+        override_data_root(
+            config,
+            args.data_root,
+            args.source_domain,
+            args.target_domain,
+        )
+    if args.face_mask_root is not None:
+        override_face_mask_root(config, args.face_mask_root)
+
     config = Config(**config)
+    experiment_dir = experiment_directory(
+        config.save_dir,
+        config.experiment,
+    )
     inference_mode = config.pipeline.type != PipelineType.pair_based
     if not inference_mode:
         Logger.info(f'Inference mode: {inference_mode}. Use optimization while testing.')
     Logger.info('Config:')
     config.print()
+    Logger.info(f"Experiment directory: '{experiment_dir}'")
     
     dm = DataSelector.select(config)
     model = ModelSelector.select(config)
     pipeline = PipelineSelector.select(config, model, reverse_prediction=args.reverse)
 
     logger = CSVLogger(
-        save_dir=os.path.join(config.save_dir, config.experiment),
-        name='logs',
+        save_dir=experiment_dir,
+        name='test_logs',
         version='',
     )
 
     trainer = L.Trainer(
         logger=logger,
-        default_root_dir=os.path.join(config.save_dir, config.experiment),
+        default_root_dir=experiment_dir,
         max_epochs=config.pipeline.params.epochs,
         accelerator=config.accelerator,
         callbacks=[
@@ -87,10 +128,10 @@ def test(args: argparse.Namespace) -> None:
         inference_mode=inference_mode,
     )
 
-    ckpt_path = os.path.join(config.save_dir, config.experiment, args.weights)
+    ckpt_path = os.path.join(experiment_dir, args.weights)
 
     if not os.path.exists(ckpt_path):
-        ckpt_path = None
+        raise ValueError(f"Checkpoint file '{ckpt_path}' does not exist.")
 
     trainer.test(
         model=pipeline, 

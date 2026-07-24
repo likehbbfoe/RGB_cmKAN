@@ -13,7 +13,7 @@ import yaml
 
 class Config(BaseModel):
     experiment: str = 'volga2k_supervised'
-    save_dir: str = 'experiments'
+    save_dir: str = '../experiment'
     resume: bool = False
     model: Model
     data: Data

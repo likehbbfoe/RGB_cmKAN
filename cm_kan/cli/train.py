@@ -8,6 +8,7 @@ from ..core.selector import (
 )
 from ..core.config import Config
 from ..core.config.data import DataType
+from ..core.config.model import ModelType
 import lightning as L
 import os
 from lightning.pytorch.callbacks import (
@@ -19,19 +20,16 @@ from lightning.pytorch.callbacks import (
 from cm_kan.ml.callbacks import GenerateCallback
 from lightning.pytorch.loggers import CSVLogger
 from cm_kan import cli
+from .custom_unpaired import (
+    domain_path,
+    override_data_root,
+    override_face_mask_root,
+)
+from .experiment_paths import experiment_directory
 
 
-def _domain_path(data_root: str, split: str, domain: str) -> str:
-    split_root = os.path.join(data_root, split)
-    path = (
-        os.path.join(split_root, domain)
-        if os.path.isdir(split_root)
-        else os.path.join(data_root, domain)
-    )
-    real_path = os.path.join(path, "real")
-    if split == "train" and os.path.isdir(real_path):
-        return real_path
-    return path
+# Backwards compatibility for code that imported this private helper.
+_domain_path = domain_path
 
 
 def add_parser(subparser: argparse) -> None:
@@ -65,6 +63,12 @@ def add_parser(subparser: argparse) -> None:
         help="Target-domain directory name below train/ and val/",
         default="target",
     )
+    parser.add_argument(
+        "--face-mask-root",
+        type=str,
+        help="Override mirrored face-mask sidecar root for custom data",
+        default=None,
+    )
 
     parser.set_defaults(func=train)
 
@@ -75,55 +79,55 @@ def train(args: argparse.Namespace) -> None:
         config = yaml.safe_load(f)
 
     if args.data_root is not None:
-        if config.get("data", {}).get("type") != DataType.custom_unpaired.value:
-            raise ValueError("--data-root can only be used with data.type=custom_unpaired")
-        config["data"]["train"] = {
-            "source": _domain_path(args.data_root, "train", args.source_domain),
-            "target": _domain_path(args.data_root, "train", args.target_domain),
-        }
-        if os.path.isdir(os.path.join(args.data_root, "val")):
-            config["data"]["val"] = {
-                "source": _domain_path(args.data_root, "val", args.source_domain),
-                "target": _domain_path(args.data_root, "val", args.target_domain),
-            }
-        else:
-            config["data"].pop("val", None)
-
-        if os.path.isdir(os.path.join(args.data_root, "test")):
-            config["data"]["test"] = {
-                "source": _domain_path(args.data_root, "test", args.source_domain),
-                "target": _domain_path(args.data_root, "test", args.target_domain),
-            }
-        else:
-            config["data"].pop("test", None)
+        override_data_root(
+            config,
+            args.data_root,
+            args.source_domain,
+            args.target_domain,
+        )
+    if args.face_mask_root is not None:
+        override_face_mask_root(config, args.face_mask_root)
 
     config = Config(**config)
     if config.data.type == DataType.custom_unpaired:
         L.seed_everything(config.data.params.seed, workers=True)
+    experiment_dir = experiment_directory(
+        config.save_dir,
+        config.experiment,
+    )
     Logger.info('Config:')
     config.print()
+    Logger.info(f"Experiment directory: '{experiment_dir}'")
     
     dm = DataSelector.select(config)
     model = ModelSelector.select(config)
     pipeline = PipelineSelector.select(config, model)
 
     logger = CSVLogger(
-        save_dir=os.path.join(config.save_dir, config.experiment),
+        save_dir=experiment_dir,
         name='logs',
         version='',
     )
 
     is_custom_unpaired = config.data.type == DataType.custom_unpaired
-    checkpoint_monitor = 'val_loss' if is_custom_unpaired else 'val_de'
-    checkpoint_filename = (
-        "{epoch}-{val_loss:.4f}"
-        if is_custom_unpaired
-        else "{epoch}-{val_de:.2f}"
+    is_reference_guided = (
+        config.model.type == ModelType.reference_cycle_cm_kan
     )
+    if is_reference_guided:
+        checkpoint_monitor = 'val_reference_selection_loss'
+        checkpoint_filename = (
+            "{epoch}-{val_reference_selection_loss:.4f}"
+        )
+    elif is_custom_unpaired:
+        checkpoint_monitor = 'val_loss'
+        checkpoint_filename = "{epoch}-{val_loss:.4f}"
+    else:
+        checkpoint_monitor = 'val_de'
+        checkpoint_filename = "{epoch}-{val_de:.2f}"
 
     trainer = L.Trainer(
         logger=logger,
-        default_root_dir=os.path.join(config.save_dir, config.experiment),
+        default_root_dir=experiment_dir,
         max_epochs=config.pipeline.params.epochs,
         accelerator=config.accelerator,
         callbacks=[
@@ -144,7 +148,10 @@ def train(args: argparse.Namespace) -> None:
         ],
     )
 
-    ckpt_path = os.path.join(config.save_dir, config.experiment, 'logs/checkpoints/last.ckpt')
+    ckpt_path = os.path.join(
+        experiment_dir,
+        'logs/checkpoints/last.ckpt',
+    )
 
     trainer.fit(
         model=pipeline, 

@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Union
 
 
@@ -37,6 +37,95 @@ class UnsupervisedPipelineParams(DefaultPipelineParams):
     pretrained: bool
     pretrained_model: Optional[str]
     training_mode: UnsupervisedTrainingMode = UnsupervisedTrainingMode.pretrain
+    adversarial_weight: float = Field(default=1.0, ge=0)
+    adversarial_ramp_epochs: int = Field(default=0, ge=0)
+    cycle_weight: float = Field(default=10.0, ge=0)
+    identity_weight: float = Field(default=5.0, ge=0)
+    domain_statistics_weight: float = Field(default=0.0, ge=0)
+    exposure_weight: float = Field(default=0.0, ge=0)
+    chroma_weight: float = Field(default=0.0, ge=0)
+    reflectance_weight: float = Field(default=0.0, ge=0)
+    patch_nce_weight: float = Field(default=0.0, ge=0)
+    patch_nce_num_patches: int = Field(default=256, ge=2)
+    patch_nce_temperature: float = Field(default=0.07, gt=0)
+    reference_style_weight: float = Field(default=0.0, ge=0)
+    reference_white_balance_weight: float = Field(default=0.0, ge=0)
+    reference_white_balance_ramp_epochs: int = Field(default=0, ge=0)
+    reference_environment_weight: float = Field(default=0.0, ge=0)
+    reference_environment_ramp_epochs: int = Field(default=0, ge=0)
+    reference_environment_chroma_std_weight: float = Field(
+        default=0.20,
+        ge=0,
+    )
+    reference_environment_luminance_weight: float = Field(
+        default=0.25,
+        ge=0,
+    )
+    reference_environment_luminance_std_weight: float = Field(
+        default=0.10,
+        ge=0,
+    )
+    reference_environment_face_dilation: int = Field(default=9, ge=0)
+    reference_environment_min_cell_fraction: float = Field(
+        default=0.05,
+        gt=0,
+        le=1,
+    )
+    reference_skin_tone_weight: float = Field(default=0.0, ge=0)
+    reference_skin_tone_ramp_epochs: int = Field(default=0, ge=0)
+    reference_skin_require_face_mask: bool = False
+    reference_skin_std_weight: float = Field(default=0.25, ge=0)
+    reference_skin_luminance_weight: float = Field(default=0.15, ge=0)
+    reference_skin_uniformity_weight: float = Field(default=0.25, ge=0)
+    reference_skin_red_overshoot_weight: float = Field(default=0.5, ge=0)
+    reference_skin_local_red_weight: float = Field(default=0.5, ge=0)
+    reference_skin_red_overshoot_margin: float = Field(default=0.03, ge=0)
+    reference_skin_min_fraction: float = Field(default=0.005, gt=0, le=1)
+    reference_skin_max_fraction: float = Field(default=0.5, gt=0, le=1)
+    reference_face_min_fraction: float = Field(default=0.0, ge=0, le=1)
+    reference_face_max_fraction: float = Field(default=1.0, gt=0, le=1)
+    reference_skin_face_density_min: float = Field(
+        default=0.0,
+        ge=0,
+        le=1,
+    )
+    reference_skin_face_density_max: float = Field(
+        default=1.0,
+        gt=0,
+        le=1,
+    )
+    reference_face_pair_area_ratio_min: float = Field(default=0.0, ge=0)
+    reference_face_pair_area_ratio_max: float = Field(default=1e6, gt=0)
+    reference_face_pair_center_distance_max: float = Field(
+        default=2.0,
+        ge=0,
+    )
+    reference_local_chroma_weight: float = Field(default=0.0, ge=0)
+    reference_local_chroma_tail_weight: float = Field(default=0.0, ge=0)
+    reference_local_chroma_tail_fraction: float = Field(
+        default=0.05,
+        gt=0,
+        le=1,
+    )
+    reference_local_chroma_threshold: float = Field(default=0.25, ge=0)
+    reference_local_red_tail_weight: float = Field(default=0.0, ge=0)
+    reference_local_red_tail_fraction: float = Field(
+        default=0.02,
+        gt=0,
+        le=1,
+    )
+    reference_local_red_threshold: float = Field(
+        default=0.1823215568,
+        ge=0,
+    )
+    reference_red_overshoot_weight: float = Field(default=0.0, ge=0)
+    reference_red_overshoot_margin: float = Field(default=0.02, ge=0)
+    range_weight: float = Field(default=0.0, ge=0)
+    range_tail_weight: float = Field(default=0.0, ge=0)
+    range_tail_fraction: float = Field(default=0.01, gt=0, le=1)
+    warmup_epochs: int = Field(default=0, ge=0)
+    gradient_clip_val: float = Field(default=0.0, ge=0)
+    discriminator_lr_scale: float = Field(default=1.0, gt=0)
 
 
 class Pipeline(BaseModel):
