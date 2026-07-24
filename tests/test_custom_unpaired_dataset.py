@@ -19,6 +19,7 @@ from cm_kan.ml.datasets.custom_unpaired.img_datamodule import (
 )
 from cm_kan.ml.datasets.custom_unpaired.img_dataset import (
     UnpairedImageDataset,
+    _ensure_face_mask,
     _ensure_rgb,
 )
 
@@ -549,6 +550,50 @@ def test_face_masks_follow_real_resize_crop_and_flip() -> None:
         assert intersection / max(union, 1) > 0.90
         assert mask.dtype == torch.float32
         assert set(mask.unique().tolist()) <= {0.0, 1.0}
+
+
+def test_face_mask_sidecar_accepts_lower_matching_aspect_resolution() -> None:
+    mask = np.zeros((8, 12), dtype=np.uint8)
+    mask[2:6, 3:9] = 255
+    image_mask = np.repeat(np.repeat(mask > 0, 2, axis=0), 2, axis=1)
+    image = np.repeat(
+        (image_mask * 255).astype(np.uint8)[..., None],
+        repeats=3,
+        axis=-1,
+    )
+
+    loaded_mask = _ensure_face_mask(
+        mask,
+        image,
+        Path("different_resolution.png"),
+    )
+    transform = FaceAwareEvalTransform(resize_size=16, crop_size=16)
+    source, _, source_mask, _ = transform(
+        image,
+        image,
+        loaded_mask,
+        loaded_mask,
+    )
+
+    assert loaded_mask.shape == (8, 12)
+    assert source_mask.shape == (1, 16, 16)
+    image_region = source[:1] > 0.5
+    mask_region = source_mask > 0.5
+    union = (image_region | mask_region).sum().item()
+    intersection = (image_region & mask_region).sum().item()
+    assert intersection / max(union, 1) > 0.90
+
+
+def test_face_mask_sidecar_rejects_mismatched_aspect_ratio() -> None:
+    mask = np.zeros((8, 8), dtype=np.uint8)
+    image = np.zeros((16, 24, 3), dtype=np.uint8)
+
+    with pytest.raises(ValueError, match="aspect ratios match"):
+        _ensure_face_mask(
+            mask,
+            image,
+            Path("wrong_aspect.png"),
+        )
 
 
 def test_pairing_mode_config_accepts_weak_aligned() -> None:

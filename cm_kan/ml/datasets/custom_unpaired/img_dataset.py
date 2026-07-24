@@ -256,7 +256,7 @@ def _ensure_face_mask(
     image: np.ndarray,
     path: Path,
 ) -> np.ndarray:
-    """Return a binary HxW float mask matching its source image."""
+    """Return a binary HxW mask in the same aspect-ratio coordinate frame."""
     if mask.ndim == 3:
         if mask.shape[-1] not in (1, 3, 4):
             raise ValueError(
@@ -265,14 +265,23 @@ def _ensure_face_mask(
         mask = mask[..., 0]
     if mask.ndim != 2:
         raise ValueError(f"Expected a 2D face mask at '{path}', got {mask.shape}")
-    if mask.shape != image.shape[:2]:
-        raise ValueError(
-            f"Face mask '{path}' has shape {mask.shape}, but its image has "
-            f"shape {image.shape[:2]}"
-        )
     if not np.isfinite(mask).all():
         raise ValueError(f"Face mask '{path}' contains non-finite values")
-    return np.ascontiguousarray((mask > 0).astype(np.float32))
+
+    binary_mask = np.ascontiguousarray((mask > 0).astype(np.float32))
+    image_shape = tuple(image.shape[:2])
+    if binary_mask.shape != image_shape:
+        mask_aspect = binary_mask.shape[1] / binary_mask.shape[0]
+        image_aspect = image_shape[1] / image_shape[0]
+        relative_aspect_error = abs(mask_aspect / image_aspect - 1)
+        if relative_aspect_error > 0.01:
+            raise ValueError(
+                f"Face mask '{path}' has shape {binary_mask.shape} and "
+                f"aspect ratio {mask_aspect:.6f}, but its image has shape "
+                f"{image_shape} and aspect ratio {image_aspect:.6f}. "
+                "Automatic resize is only safe when aspect ratios match."
+            )
+    return np.ascontiguousarray(binary_mask)
 
 
 class UnpairedImageDataset(Dataset):

@@ -776,35 +776,94 @@ class UnsupervisedPipeline(L.LightningModule):
 
     @staticmethod
     def _prepare_face_roi(face_mask, images, name):
-        """Validate a transformed face ROI or return an all-image fallback."""
+        """Normalize a face ROI to detached Bx1xHxW image coordinates."""
+        if images.ndim != 4:
+            raise ValueError(
+                f"images must have shape BxCxHxW, got {tuple(images.shape)}"
+            )
+        batch_size, _, height, width = images.shape
         if face_mask is None:
             return images.new_ones(
                 (
-                    images.shape[0],
+                    batch_size,
                     1,
-                    images.shape[2],
-                    images.shape[3],
+                    height,
+                    width,
                 )
             )
-        if face_mask.ndim == 3:
-            face_mask = face_mask.unsqueeze(1)
-        expected_shape = (
-            images.shape[0],
-            1,
-            images.shape[2],
-            images.shape[3],
-        )
-        if tuple(face_mask.shape) != expected_shape:
+
+        face_mask = torch.as_tensor(face_mask)
+        original_shape = tuple(face_mask.shape)
+        if face_mask.ndim == 2:
+            if batch_size != 1:
+                raise ValueError(
+                    f"{name} with shape {original_shape} has no batch "
+                    f"dimension, but images have batch size {batch_size}"
+                )
+            face_mask = face_mask.unsqueeze(0).unsqueeze(0)
+        elif face_mask.ndim == 3:
+            if face_mask.shape[0] == batch_size:
+                # BxHxW
+                face_mask = face_mask.unsqueeze(1)
+            elif batch_size == 1 and face_mask.shape[0] in (1, 3, 4):
+                # CxHxW for one image. RGB/RGBA masks use their first channel.
+                face_mask = face_mask[:1].unsqueeze(0)
+            elif batch_size == 1 and face_mask.shape[-1] in (1, 3, 4):
+                # HxWxC for one image.
+                face_mask = face_mask[..., 0].unsqueeze(0).unsqueeze(0)
+            else:
+                raise ValueError(
+                    f"{name} with shape {original_shape} cannot be matched "
+                    f"to image batch size {batch_size}"
+                )
+        elif face_mask.ndim == 4:
+            if face_mask.shape[0] != batch_size:
+                raise ValueError(
+                    f"{name} has batch size {face_mask.shape[0]}, but images "
+                    f"have batch size {batch_size}; automatic batch "
+                    "broadcasting is unsafe for per-image face masks"
+                )
+            if face_mask.shape[1] in (1, 3, 4):
+                # BxCxHxW
+                face_mask = face_mask[:, :1]
+            elif face_mask.shape[-1] in (1, 3, 4):
+                # BxHxWxC
+                face_mask = face_mask[..., 0].unsqueeze(1)
+            else:
+                raise ValueError(
+                    f"{name} with shape {original_shape} has no recognizable "
+                    "single/RGB/RGBA channel dimension"
+                )
+        else:
             raise ValueError(
-                f"{name} must have shape {expected_shape}, "
-                f"got {tuple(face_mask.shape)}"
+                f"{name} must be HW, BHW, CHW, HWC, BCHW, or BHWC; "
+                f"got {original_shape}"
             )
-        return (
-            face_mask
-            .to(device=images.device, dtype=images.dtype)
-            .detach()
-            .clamp(0, 1)
-        )
+
+        face_mask = face_mask.to(
+            device=images.device,
+            dtype=images.dtype,
+        ).detach()
+        if not torch.isfinite(face_mask).all():
+            raise ValueError(f"{name} contains non-finite values")
+        if tuple(face_mask.shape[-2:]) != (height, width):
+            mask_aspect = face_mask.shape[-1] / face_mask.shape[-2]
+            image_aspect = width / height
+            relative_aspect_error = abs(mask_aspect / image_aspect - 1)
+            if relative_aspect_error > 0.01:
+                raise ValueError(
+                    f"{name} has spatial shape "
+                    f"{tuple(face_mask.shape[-2:])}, but images have shape "
+                    f"{(height, width)}. Automatic resize is only safe when "
+                    "aspect ratios match; use the paired data transform to "
+                    "keep crop and flip coordinates synchronized."
+                )
+            face_mask = F.interpolate(
+                face_mask,
+                size=(height, width),
+                mode="nearest",
+            )
+        return face_mask.clamp(0, 1)
 
     @classmethod
     def _weighted_skin_statistics(cls, images, mask, eps=1e-3):

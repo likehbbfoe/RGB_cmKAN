@@ -309,6 +309,72 @@ def test_face_roi_excludes_skin_colored_background_from_tone_statistics() -> Non
     )
 
 
+def test_face_roi_adapts_bhw_mask_to_image_spatial_shape() -> None:
+    images = torch.zeros((2, 3, 16, 24))
+    face_mask = torch.zeros((2, 8, 12))
+    face_mask[0, 2:6, 3:9] = 1
+    face_mask[1, 1:7, 2:10] = 1
+
+    prepared = UnsupervisedPipeline._prepare_face_roi(
+        face_mask,
+        images,
+        "face_mask",
+    )
+
+    assert prepared.shape == (2, 1, 16, 24)
+    assert torch.equal(
+        prepared[0, 0, 4:12, 6:18],
+        torch.ones((8, 12)),
+    )
+    assert prepared.device == images.device
+    assert prepared.dtype == images.dtype
+
+
+def test_face_roi_accepts_rgb_bchw_and_channel_last_masks() -> None:
+    images = torch.zeros((1, 3, 16, 24))
+    channel_first = torch.zeros((1, 3, 8, 12))
+    channel_first[:, 0, 2:6, 3:9] = 1
+    channel_last = channel_first.permute(0, 2, 3, 1)
+
+    prepared_first = UnsupervisedPipeline._prepare_face_roi(
+        channel_first,
+        images,
+        "channel_first",
+    )
+    prepared_last = UnsupervisedPipeline._prepare_face_roi(
+        channel_last,
+        images,
+        "channel_last",
+    )
+
+    assert prepared_first.shape == (1, 1, 16, 24)
+    assert torch.equal(prepared_first, prepared_last)
+
+
+def test_face_roi_rejects_unsafe_batch_broadcast() -> None:
+    images = torch.zeros((2, 3, 16, 24))
+    one_mask = torch.zeros((1, 1, 8, 12))
+
+    with pytest.raises(ValueError, match="automatic batch broadcasting"):
+        UnsupervisedPipeline._prepare_face_roi(
+            one_mask,
+            images,
+            "face_mask",
+        )
+
+
+def test_face_roi_rejects_mismatched_spatial_aspect_ratio() -> None:
+    images = torch.zeros((1, 3, 16, 24))
+    square_mask = torch.zeros((1, 1, 8, 8))
+
+    with pytest.raises(ValueError, match="aspect ratios match"):
+        UnsupervisedPipeline._prepare_face_roi(
+            square_mask,
+            images,
+            "face_mask",
+        )
+
+
 def test_black_face_roi_skips_only_the_skin_objective() -> None:
     source = torch.tensor([0.62, 0.41, 0.28]).view(1, 3, 1, 1)
     source = source.expand(1, 3, 16, 16)
