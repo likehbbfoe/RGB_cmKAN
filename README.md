@@ -175,6 +175,12 @@ Generate the private sidecar masks on the training server:
 python scripts/generate_face_masks.py
 ```
 
+This command is safe on a headless server: it never opens a window, prints
+aggregate progress every 25 images, and writes the preview PNG only after mask
+generation finishes. Preview selection uses statistics cached during generation
+and re-reads only the selected 30 images. An interrupted run can be restarted
+without overwriting completed or manually corrected masks.
+
 Inspect `/home/share/y50063074/data_face_masks/face_mask_preview.png` before
 training. Its third column is the actual `face ROI × skin color` mask used by
 the loss; white must cover facial skin rather than the surrounding background.

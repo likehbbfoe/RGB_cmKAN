@@ -27,6 +27,16 @@ IMAGE_SUFFIXES = {
 FaceBox = tuple[int, int, int, int]
 FaceDetector = Callable[[np.ndarray], Sequence[Sequence[int]]]
 
+# These thresholds mirror the v6 face-skin server/example configs.  The
+# generator reports pre-transform quality estimates with them; training still
+# performs the authoritative check after resize/crop augmentation.
+V6_QC_SKIN_MIN_FRACTION = 0.005
+V6_QC_SKIN_MAX_FRACTION = 0.50
+V6_QC_FACE_MIN_FRACTION = 0.01
+V6_QC_FACE_MAX_FRACTION = 0.35
+V6_QC_SKIN_FACE_DENSITY_MIN = 0.10
+V6_QC_SKIN_FACE_DENSITY_MAX = 0.90
+
 
 @dataclass(frozen=True)
 class FaceMaskRecord:
@@ -39,6 +49,9 @@ class FaceMaskRecord:
     face_box: FaceBox | None
     reused: bool = False
     detected_override: bool | None = None
+    roi_fraction: float = 0.0
+    skin_fraction: float = 0.0
+    skin_face_density: float = 0.0
 
     @property
     def detected(self) -> bool:
@@ -221,6 +234,32 @@ def final_skin_mask(image: np.ndarray, face_mask: np.ndarray) -> np.ndarray:
     ).astype(np.uint8)
 
 
+def _mask_statistics(
+    image: np.ndarray,
+    face_mask: np.ndarray,
+) -> tuple[float, float, float]:
+    """Measure one mask once so preview selection needs no extra image I/O."""
+    if face_mask.shape != image.shape[:2]:
+        raise ValueError(
+            f"Face mask has shape {face_mask.shape}, expected {image.shape[:2]}"
+        )
+    roi = face_mask > 0
+    roi_count = int(roi.sum())
+    pixel_count = int(roi.size)
+    if roi_count == 0:
+        return 0.0, 0.0, 0.0
+
+    skin_count = int((final_skin_mask(image, face_mask) > 0).sum())
+    roi_fraction = roi_count / pixel_count
+    skin_fraction = skin_count / pixel_count
+    skin_face_density = skin_count / roi_count
+    return (
+        float(roi_fraction),
+        float(skin_fraction),
+        float(skin_face_density),
+    )
+
+
 class OpenCVHaarFaceDetector:
     """Callable wrapper that keeps OpenCV out of the training package."""
 
@@ -365,50 +404,82 @@ def generate_face_masks(
     splits: Sequence[str] = ("train", "val"),
     domains: Sequence[str] = ("source", "target"),
     overwrite: bool = False,
+    progress_every: int = 0,
 ) -> list[FaceMaskRecord]:
     """Generate one full-resolution PNG mask for every discovered image."""
+    if progress_every < 0:
+        raise ValueError("progress_every cannot be negative")
+    if progress_every:
+        print("[masks] Scanning dataset...", flush=True)
     plan = _generation_plan(data_root, output_root, splits, domains)
-    records = []
-    for split, domain, image_path, destination in plan:
+    if progress_every:
+        print(f"[masks] Found {len(plan)} image(s).", flush=True)
+
+    records: list[FaceMaskRecord] = []
+    detected_count = 0
+    reused_count = 0
+    total = len(plan)
+    for index, (split, domain, image_path, destination) in enumerate(
+        plan,
+        start=1,
+    ):
         image = to_uint8_rgb(imageio.imread(image_path))
         if destination.is_file() and not overwrite:
-            existing_mask = np.asarray(
+            mask = np.asarray(
                 Image.open(destination).convert("L")
             )
-            if existing_mask.shape != image.shape[:2]:
+            if mask.shape != image.shape[:2]:
                 raise ValueError(
                     f"Existing mask '{destination}' has shape "
-                    f"{existing_mask.shape}, expected {image.shape[:2]}. "
+                    f"{mask.shape}, expected {image.shape[:2]}. "
                     "Delete it or rerun with --overwrite."
                 )
-            records.append(
-                FaceMaskRecord(
-                    split=split,
-                    domain=domain,
-                    image_path=image_path,
-                    mask_path=destination,
-                    face_box=None,
-                    reused=True,
-                    detected_override=bool(existing_mask.any()),
-                )
+            face_box = None
+            reused = True
+            detected_override = bool(mask.any())
+        else:
+            face_box = select_largest_face(detector(image))
+            mask = ellipse_roi_mask(
+                height=image.shape[0],
+                width=image.shape[1],
+                box=face_box,
             )
-            continue
-        face_box = select_largest_face(detector(image))
-        mask = ellipse_roi_mask(
-            height=image.shape[0],
-            width=image.shape[1],
-            box=face_box,
+            _write_mask(mask, destination)
+            reused = False
+            detected_override = None
+
+        (
+            roi_fraction,
+            skin_fraction,
+            skin_face_density,
+        ) = _mask_statistics(image, mask)
+        record = FaceMaskRecord(
+            split=split,
+            domain=domain,
+            image_path=image_path,
+            mask_path=destination,
+            face_box=face_box,
+            reused=reused,
+            detected_override=detected_override,
+            roi_fraction=roi_fraction,
+            skin_fraction=skin_fraction,
+            skin_face_density=skin_face_density,
         )
-        _write_mask(mask, destination)
-        records.append(
-            FaceMaskRecord(
-                split=split,
-                domain=domain,
-                image_path=image_path,
-                mask_path=destination,
-                face_box=face_box,
+        records.append(record)
+        detected_count += int(record.detected)
+        reused_count += int(record.reused)
+        if progress_every and (
+            index == 1
+            or index % progress_every == 0
+            or index == total
+        ):
+            print(
+                f"[masks] {index}/{total} "
+                f"written={index - reused_count} reused={reused_count} "
+                f"detected={detected_count} "
+                f"missed={index - detected_count}",
+                flush=True,
             )
-        )
     return records
 
 
@@ -437,6 +508,102 @@ def summarize_records(records: Sequence[FaceMaskRecord]) -> str:
             f"detected={group_detected} "
             f"missed={len(group) - group_detected}"
         )
+    return "\n".join(lines)
+
+
+def _percentile_text(values: Sequence[float]) -> str:
+    if not values:
+        return "n/a"
+    p05, p50, p95 = np.percentile(values, (5, 50, 95))
+    return f"{p05:.3f}/{p50:.3f}/{p95:.3f}"
+
+
+def _single_mask_passes_v6_qc(record: FaceMaskRecord) -> bool:
+    return (
+        record.detected
+        and V6_QC_SKIN_MIN_FRACTION
+        <= record.skin_fraction
+        <= V6_QC_SKIN_MAX_FRACTION
+        and V6_QC_FACE_MIN_FRACTION
+        <= record.roi_fraction
+        <= V6_QC_FACE_MAX_FRACTION
+        and V6_QC_SKIN_FACE_DENSITY_MIN
+        <= record.skin_face_density
+        <= V6_QC_SKIN_FACE_DENSITY_MAX
+    )
+
+
+def summarize_quality(records: Sequence[FaceMaskRecord]) -> str:
+    """Return privacy-safe, pre-transform QC using the v6 single-mask gates."""
+    lines = [
+        "Face-mask pre-transform QC",
+        (
+            "thresholds: skin_fraction=[0.005,0.500] "
+            "face_fraction=[0.010,0.350] "
+            "skin/face_density=[0.100,0.900]"
+        ),
+        "p05/p50/p95 values are fractions in [0,1].",
+    ]
+    group_names = sorted(
+        {(record.split, record.domain) for record in records}
+    )
+    total_usable = 0
+    for split, domain in group_names:
+        group = [
+            record
+            for record in records
+            if record.split == split and record.domain == domain
+        ]
+        detected = [record for record in group if record.detected]
+        usable = sum(_single_mask_passes_v6_qc(record) for record in group)
+        total_usable += usable
+        face_outside = sum(
+            not (
+                V6_QC_FACE_MIN_FRACTION
+                <= record.roi_fraction
+                <= V6_QC_FACE_MAX_FRACTION
+            )
+            for record in detected
+        )
+        skin_outside = sum(
+            not (
+                V6_QC_SKIN_MIN_FRACTION
+                <= record.skin_fraction
+                <= V6_QC_SKIN_MAX_FRACTION
+            )
+            for record in detected
+        )
+        density_outside = sum(
+            not (
+                V6_QC_SKIN_FACE_DENSITY_MIN
+                <= record.skin_face_density
+                <= V6_QC_SKIN_FACE_DENSITY_MAX
+            )
+            for record in detected
+        )
+        lines.append(
+            f"{split}/{domain}: usable={usable}/{len(group)} "
+            f"missed={len(group) - len(detected)} "
+            f"face_outside={face_outside} "
+            f"skin_outside={skin_outside} "
+            f"density_outside={density_outside}"
+        )
+        lines.append(
+            "  p05/p50/p95: "
+            f"face={_percentile_text([r.roi_fraction for r in detected])} "
+            f"skin={_percentile_text([r.skin_fraction for r in detected])} "
+            "skin/face="
+            f"{_percentile_text([r.skin_face_density for r in detected])}"
+        )
+    excluded = len(records) - total_usable
+    lines.append(
+        f"single-mask gate estimate: usable={total_usable}/{len(records)} "
+        f"excluded={excluded}"
+    )
+    lines.append(
+        "Note: training rechecks masks after synchronized resize/crop; "
+        "pair area/center gates are reported by the training CSV."
+    )
     return "\n".join(lines)
 
 
@@ -473,20 +640,11 @@ def _preview_records(
     )
 
     def risk_score(record):
-        image = to_uint8_rgb(imageio.imread(record.image_path))
-        face_mask = np.asarray(
-            Image.open(record.mask_path).convert("L")
-        )
-        roi_fraction = float((face_mask > 0).mean())
-        roi_count = max(int((face_mask > 0).sum()), 1)
-        skin_density = float(
-            (final_skin_mask(image, face_mask) > 0).sum() / roi_count
-        )
         # Extremal density and atypical ROI area are the most useful cases
         # to inspect for beige-background false positives or wrong boxes.
-        density_risk = abs(skin_density - 0.5)
+        density_risk = abs(record.skin_face_density - 0.5)
         area_risk = abs(
-            np.log(max(roi_fraction, 1e-4) / 0.12)
+            np.log(max(record.roi_fraction, 1e-4) / 0.12)
         )
         return density_risk + 0.25 * area_risk
 
@@ -545,10 +703,13 @@ def write_preview(
     output_path: Path,
     sample_count: int = 12,
     panel_size: int = 256,
+    progress_every: int = 0,
 ) -> Path:
     """Save original, face ROI, final skin mask, and overlay rows."""
     if panel_size < 64:
         raise ValueError("panel_size must be at least 64")
+    if progress_every < 0:
+        raise ValueError("progress_every cannot be negative")
     selected = _preview_records(records, sample_count)
     if not selected:
         raise ValueError("Cannot create a preview without generated masks")
@@ -631,6 +792,16 @@ def write_preview(
                 )
             )
         )
+        completed = row + 1
+        if progress_every and (
+            completed == 1
+            or completed % progress_every == 0
+            or completed == len(selected)
+        ):
+            print(
+                f"[preview] {completed}/{len(selected)} row(s) prepared",
+                flush=True,
+            )
 
     output_path = output_path.expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -692,6 +863,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview-samples", type=int, default=30)
     parser.add_argument("--panel-size", type=int, default=256)
     parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=25,
+        help=(
+            "Print aggregate progress every N images; use 0 to disable. "
+            "No image names are printed."
+        ),
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help=(
@@ -708,6 +888,8 @@ def main() -> None:
         raise SystemExit("ERROR: --preview-samples cannot be negative")
     if args.panel_size < 64:
         raise SystemExit("ERROR: --panel-size must be at least 64")
+    if args.progress_every < 0:
+        raise SystemExit("ERROR: --progress-every cannot be negative")
 
     try:
         detector = OpenCVHaarFaceDetector(
@@ -724,18 +906,28 @@ def main() -> None:
             splits=args.splits,
             domains=args.domains,
             overwrite=args.overwrite,
+            progress_every=args.progress_every,
         )
+        print(summarize_records(records), flush=True)
+        print(summarize_quality(records), flush=True)
+        print(f"Masks saved under: {args.output_root}", flush=True)
         if args.preview_samples > 0:
             preview_output = (
                 args.preview_output
                 if args.preview_output is not None
                 else args.output_root / "face_mask_preview.png"
             )
+            preview_count = min(args.preview_samples, len(records))
+            print(
+                f"[preview] Writing {preview_count} sampled row(s)...",
+                flush=True,
+            )
             preview_manifest = write_preview(
                 records,
                 preview_output,
                 sample_count=args.preview_samples,
                 panel_size=args.panel_size,
+                progress_every=5 if args.progress_every else 0,
             )
         else:
             preview_output = None
@@ -743,15 +935,17 @@ def main() -> None:
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         raise SystemExit(f"ERROR: {exc}") from exc
 
-    print(summarize_records(records))
-    print(f"Masks saved under: {args.output_root}")
     if preview_output is not None:
-        print(f"Preview saved to: {preview_output}")
-        print(f"Preview row manifest saved to: {preview_manifest}")
+        print(f"Preview saved to: {preview_output}", flush=True)
+        print(
+            f"Preview row manifest saved to: {preview_manifest}",
+            flush=True,
+        )
         print(
             "Preview columns: original | face ROI | ROI x skin mask | "
             "final overlay. White pixels in the third column enter the "
-            "skin statistics; black pixels are excluded."
+            "skin statistics; black pixels are excluded.",
+            flush=True,
         )
 
 

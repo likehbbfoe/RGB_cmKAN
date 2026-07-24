@@ -787,6 +787,16 @@ python scripts/generate_face_masks.py
 预览会优先纳入漏检、ROI 面积异常和 ROI 内肤色密度极端的高风险样本。路径不同时
 再使用 `--data-root`、`--output-root` 覆盖。
 
+服务器不需要显示器或桌面环境：脚本不会弹出窗口，只会在磁盘上写 PNG。生成期间
+终端默认每 25 张打印一次不含文件名的聚合进度。生成 mask 时会顺手缓存预览所需的
+面积和肤色密度统计，因此最后挑选预览样本时不会再无提示地全量读取一遍数据；只会
+重新读取最终入选的 30 张。看到 `Preview saved to:` 后，预览图才算写完。如果中途
+停止，已经写好的 mask 会保留，直接重跑即可续用。只想生成 mask、不需要预览时可用：
+
+```bash
+python scripts/generate_face_masks.py --preview-samples 0
+```
+
 脚本使用项目已有的 OpenCV 和
 `haarcascade_frontalface_default.xml`，不下载在线模型。多人脸时选择面积最大的
 检测框，并在框内生成稍微收紧的椭圆 ROI。输出目录严格镜像原数据目录：
@@ -812,8 +822,10 @@ python scripts/generate_face_masks.py
 mask：/home/share/y50063074/data_face_masks/train/source/scene_01/a.png
 ```
 
-生成结束会按 `split/domain` 打印 `total/detected/missed`。检测不到人脸时仍会写出
-同尺寸全黑单通道 PNG：
+生成结束会按 `split/domain` 打印 `total/detected/missed`，并输出 ROI 面积、最终
+肤色面积、ROI 内肤色密度的 p05/p50/p95 和预计可用数。这些是增强前的隐私安全聚合
+统计，不包含图片名或路径；训练仍会在同步 resize/crop 后重新做最终 gate 判断。
+检测不到人脸时仍会写出同尺寸全黑单通道 PNG：
 
 - mask 文件缺失：数据不完整，训练启动时立即报错，不允许静默退回 v5；
 - mask 文件存在但全黑：该样本仅跳过 skin loss，cycle、identity、对抗、曝光、

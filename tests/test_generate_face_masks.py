@@ -1,14 +1,18 @@
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
 
+import scripts.generate_face_masks as face_mask_script
 from scripts.generate_face_masks import (
+    FaceMaskRecord,
     ellipse_roi_mask,
     final_skin_mask,
     generate_face_masks,
     mask_output_path,
     select_largest_face,
+    summarize_quality,
     summarize_records,
     to_uint8_rgb,
     write_preview,
@@ -128,6 +132,12 @@ def test_generate_face_masks_mirrors_tree_and_writes_black_misses(
     assert detected_mask.any()
     assert detected_mask.shape == (24, 32)
     assert all(record.mask_path.is_file() for record in records)
+    assert all(0.0 <= record.roi_fraction <= 1.0 for record in records)
+    assert all(0.0 <= record.skin_fraction <= 1.0 for record in records)
+    assert all(
+        0.0 <= record.skin_face_density <= 1.0
+        for record in records
+    )
 
     summary = summarize_records(records)
     assert "total=4 detected=2 missed=2" in summary
@@ -224,3 +234,151 @@ def test_existing_manual_mask_is_preserved_without_overwrite(
     assert records[0].reused is True
     assert records[0].detected is True
     assert np.array_equal(np.asarray(Image.open(mask_path)), manual_mask)
+    assert records[0].roi_fraction == manual_mask.astype(bool).mean()
+
+
+def test_quality_summary_is_aggregate_and_privacy_safe() -> None:
+    records = [
+        FaceMaskRecord(
+            split="train",
+            domain="source",
+            image_path=Path("/private/secret_portrait_1.jpg"),
+            mask_path=Path("/private/masks/secret_portrait_1.png"),
+            face_box=None,
+            detected_override=True,
+            roi_fraction=0.12,
+            skin_fraction=0.06,
+            skin_face_density=0.50,
+        ),
+        FaceMaskRecord(
+            split="train",
+            domain="source",
+            image_path=Path("/private/secret_portrait_2.jpg"),
+            mask_path=Path("/private/masks/secret_portrait_2.png"),
+            face_box=None,
+            detected_override=False,
+        ),
+    ]
+
+    summary = summarize_quality(records)
+
+    assert "train/source: usable=1/2 missed=1" in summary
+    assert "single-mask gate estimate: usable=1/2 excluded=1" in summary
+    assert "secret_portrait" not in summary
+    assert "/private" not in summary
+
+
+def test_progress_reports_first_interval_and_last(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "face_masks"
+    for index in range(5):
+        _write_rgb(
+            data_root / "train/source" / f"portrait_{index}.png",
+            120,
+        )
+
+    generate_face_masks(
+        data_root=data_root,
+        output_root=output_root,
+        detector=lambda image: [(4, 3, 16, 16)],
+        splits=("train",),
+        domains=("source",),
+        progress_every=2,
+    )
+
+    output = capsys.readouterr().out
+    assert "[masks] 1/5" in output
+    assert "[masks] 2/5" in output
+    assert "[masks] 4/5" in output
+    assert "[masks] 5/5" in output
+
+    generate_face_masks(
+        data_root=data_root,
+        output_root=output_root,
+        detector=lambda image: [],
+        splits=("train",),
+        domains=("source",),
+        progress_every=2,
+    )
+
+    reused_output = capsys.readouterr().out
+    assert "[masks] 5/5 written=0 reused=5" in reused_output
+
+
+def test_preview_reads_only_the_selected_images(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    output_root = tmp_path / "face_masks"
+    for index in range(20):
+        _write_rgb(
+            data_root / "train/source" / f"detected_{index}.png",
+            160,
+        )
+    for index in range(4):
+        _write_rgb(
+            data_root / "train/source" / f"missed_{index}.png",
+            40,
+        )
+
+    def fake_detector(image: np.ndarray):
+        if int(image.mean()) < 100:
+            return []
+        return [(4, 3, 16, 16)]
+
+    records = generate_face_masks(
+        data_root=data_root,
+        output_root=output_root,
+        detector=fake_detector,
+        splits=("train",),
+        domains=("source",),
+    )
+    original_imread = face_mask_script.imageio.imread
+    original_mask_open = face_mask_script.Image.open
+    read_paths = []
+    opened_mask_paths = []
+
+    def counting_imread(path):
+        read_paths.append(path)
+        return original_imread(path)
+
+    def counting_mask_open(path, *args, **kwargs):
+        opened_mask_paths.append(path)
+        return original_mask_open(path, *args, **kwargs)
+
+    with patch.object(
+        face_mask_script.imageio,
+        "imread",
+        side_effect=counting_imread,
+    ), patch.object(
+        face_mask_script.Image,
+        "open",
+        side_effect=counting_mask_open,
+    ):
+        manifest_path = write_preview(
+            records,
+            output_root / "face_mask_preview.png",
+            sample_count=6,
+            panel_size=64,
+        )
+
+    assert len(read_paths) == 6
+    sidecar_opens = [
+        path
+        for path in opened_mask_paths
+        if str(
+            Path(
+                path
+                if isinstance(path, (str, Path))
+                else path.name
+            ).resolve()
+        ).startswith(str(output_root.resolve()))
+    ]
+    assert len(sidecar_opens) == 6
+    manifest_lines = manifest_path.read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert len(manifest_lines) == 7
