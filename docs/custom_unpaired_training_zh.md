@@ -934,6 +934,15 @@ python scripts/report_reference_metrics.py /path/to/metrics.csv
 python scripts/report_reference_metrics.py --all
 ```
 
+如果结果明显整体偏红，只运行下面这个精简模式即可：
+
+```bash
+python scripts/report_reference_metrics.py --red
+```
+
+它会输出一行全局红绿/蓝绿偏差、冷暖与绿—洋红偏差、source 到 target 的基线、
+局部红斑和相对 target 的红通道过冲。该模式同样只读取 CSV，不读取任何图片或文件名。
+
 完整报告中的旧字段含义如下：
 
 - `selection`：当前最佳 checkpoint 的固定权重选择分数，越小越好。

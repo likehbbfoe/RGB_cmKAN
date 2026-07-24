@@ -27,6 +27,25 @@ COMPACT_OUTPUT_METRICS = (
     ("red_bad", "val_fake_target_local_red_bad_fraction"),
 )
 
+RED_OUTPUT_METRICS = (
+    ("ratio", "val_reference_style_ratio"),
+    ("move", "val_source_fake_l1"),
+    ("response", "val_reference_response_l1"),
+    ("luma_ratio", "val_fake_target_luminance_ratio"),
+    ("rg_delta", "val_fake_target_red_green_delta"),
+    ("bg_delta", "val_fake_target_blue_green_delta"),
+    ("warm_bias", "val_fake_target_warm_bias"),
+    ("warm_abs", "val_fake_target_warm_abs"),
+    ("warm_positive", "val_fake_target_warm_positive_fraction"),
+    ("tint_bias", "val_fake_target_tint_bias"),
+    ("tint_abs", "val_fake_target_tint_abs"),
+    ("source_warm", "val_source_target_warm_bias"),
+    ("source_tint", "val_source_target_tint_bias"),
+    ("red_tail", "val_fake_target_local_red_tail"),
+    ("red_bad", "val_fake_target_local_red_bad_fraction"),
+    ("red_overshoot", "val_fake_target_red_overshoot_loss"),
+)
+
 LEGACY_OUTPUT_METRICS = (
     ("source_ref", "val_source_reference_style_distance"),
     ("fake_ref", "val_fake_reference_style_distance"),
@@ -90,10 +109,22 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_METRICS_PATH,
         help="Path to the Lightning CSVLogger metrics.csv file",
     )
-    parser.add_argument(
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
         "--all",
         action="store_true",
-        help="Print all legacy and safety metrics instead of the compact six-field report",
+        help=(
+            "Print all legacy and safety metrics instead of the compact "
+            "six-field report"
+        ),
+    )
+    output_group.add_argument(
+        "--red",
+        action="store_true",
+        help=(
+            "Print only the metrics needed to diagnose global and local "
+            "red color casts"
+        ),
     )
     return parser.parse_args()
 
@@ -179,7 +210,12 @@ def main() -> None:
         epoch, summary = summarize_metrics(args.metrics)
     except (FileNotFoundError, OSError, ValueError) as exc:
         raise SystemExit(f"ERROR: {exc}") from exc
-    output_metrics = ALL_OUTPUT_METRICS if args.all else COMPACT_OUTPUT_METRICS
+    if args.all:
+        output_metrics = ALL_OUTPUT_METRICS
+    elif args.red:
+        output_metrics = RED_OUTPUT_METRICS
+    else:
+        output_metrics = COMPACT_OUTPUT_METRICS
     print(format_summary(epoch, summary, output_metrics))
 
 

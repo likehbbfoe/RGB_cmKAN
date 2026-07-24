@@ -3,6 +3,7 @@ from pathlib import Path
 
 from scripts.report_reference_metrics import (
     COMPACT_OUTPUT_METRICS,
+    RED_OUTPUT_METRICS,
     format_summary,
     summarize_metrics,
 )
@@ -137,6 +138,20 @@ def test_summarize_metrics_uses_latest_validation_epoch(tmp_path: Path) -> None:
         "epoch=136 ratio=0.900000 move=0.042000 "
         "response=0.036000 direct=0.021000 "
         "luma_ratio=0.960000 red_bad=0.004000"
+    )
+    assert format_summary(
+        epoch,
+        summary,
+        RED_OUTPUT_METRICS,
+    ) == (
+        "epoch=136 ratio=0.900000 move=0.042000 "
+        "response=0.036000 luma_ratio=0.960000 "
+        "rg_delta=0.012000 bg_delta=-0.008000 "
+        "warm_bias=0.010000 warm_abs=0.014000 "
+        "warm_positive=0.700000 tint_bias=-0.011000 "
+        "tint_abs=0.013000 source_warm=0.030000 "
+        "source_tint=-0.020000 red_tail=0.012000 "
+        "red_bad=0.004000 red_overshoot=0.002000"
     )
 
 
