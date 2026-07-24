@@ -1,5 +1,5 @@
 experiment: custom_unpaired_weak_nce_v4
-save_dir: experiments
+save_dir: ../experiment
 resume: false
 accelerator: gpu
 

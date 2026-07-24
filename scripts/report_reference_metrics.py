@@ -11,11 +11,18 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+FALLBACK_METRICS_PATH = (
+    PROJECT_ROOT.parent
+    / "experiment"
+    / "custom_one_to_one_reference_color_v6_face_skin"
+    / "logs"
+    / "metrics.csv"
+)
 DEFAULT_METRICS_PATH = Path(
     os.environ.get(
         "CMKAN_METRICS_PATH",
-        "experiments/custom_one_to_one_reference_color_v6_face_skin/"
-        "logs/metrics.csv",
+        str(FALLBACK_METRICS_PATH),
     )
 )
 

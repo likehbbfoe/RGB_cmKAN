@@ -1,5 +1,5 @@
 experiment: volga2k_unsupervised
-save_dir: experiments
+save_dir: ../experiment
 resume: True
 accelerator: 'gpu'
 
@@ -40,4 +40,4 @@ pipeline:
     save_freq: 10
     visualize_freq: 10
     pretrained: True
-    pretrained_model: 'experiments/volga2k_unsupervised_pretrain/logs/checkpoints/last.ckpt'
+    pretrained_model: '../experiment/volga2k_unsupervised_pretrain/logs/checkpoints/last.ckpt'

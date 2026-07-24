@@ -18,6 +18,10 @@ from lightning.pytorch.callbacks import (
 from cm_kan.ml.callbacks import ImagePredictionWriter
 from lightning.pytorch.loggers import CSVLogger
 from cm_kan import cli
+from .experiment_paths import (
+    experiment_directory,
+    prediction_output_directory,
+)
 
 
 class _ReferencePathAction(argparse.Action):
@@ -69,8 +73,11 @@ def add_parser(subparser: argparse) -> None:
     parser.add_argument(
         "-o", "--output",
         type=str,
-        help="Path to the output folder, will be created if not exists",
-        default="data/samples/output",
+        help=(
+            "Path to the output folder. Defaults to "
+            "<save_dir>/<experiment>/predictions"
+        ),
+        default=None,
         required=False,
     )
     parser.add_argument(
@@ -102,6 +109,15 @@ def predict(args: argparse.Namespace) -> None:
         config = yaml.safe_load(f)
 
     config = Config(**config)
+    experiment_dir = experiment_directory(
+        config.save_dir,
+        config.experiment,
+    )
+    output_dir = prediction_output_directory(
+        config.save_dir,
+        config.experiment,
+        args.output,
+    )
 
     reference_guided = config.model.type == ModelType.reference_cycle_cm_kan
 
@@ -132,6 +148,8 @@ def predict(args: argparse.Namespace) -> None:
         Logger.info(f'Inference mode: {inference_mode}. Use optimization while testing.')
     Logger.info('Config:')
     config.print()
+    Logger.info(f"Experiment directory: '{experiment_dir}'")
+    Logger.info(f"Prediction output directory: '{output_dir}'")
     
     dm = ImgPredictDataModule(
         input_path=args.input,
@@ -144,28 +162,28 @@ def predict(args: argparse.Namespace) -> None:
     pipeline = PipelineSelector.select(config, model, reverse_prediction=args.reverse)
 
     logger = CSVLogger(
-        save_dir=os.path.join(config.save_dir, config.experiment),
+        save_dir=experiment_dir,
         name='predict_logs',
         version='',
     )
 
     trainer = L.Trainer(
         logger=logger,
-        default_root_dir=os.path.join(config.save_dir, config.experiment),
+        default_root_dir=experiment_dir,
         max_epochs=config.pipeline.params.epochs,
         accelerator=config.accelerator,
         callbacks=[
             RichModelSummary(),
             RichProgressBar(),
             ImagePredictionWriter(
-                output_dir=os.path.join(args.output),
+                output_dir=output_dir,
                 write_interval='batch',
             ),
         ],
         inference_mode=inference_mode,
     )
 
-    ckpt_path = os.path.join(config.save_dir, config.experiment, args.weights)
+    ckpt_path = os.path.join(experiment_dir, args.weights)
 
     if not os.path.exists(ckpt_path):
         raise ValueError(f"Checkpoint file '{ckpt_path}' does not exist.")

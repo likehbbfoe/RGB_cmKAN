@@ -7,7 +7,7 @@ SOURCE_DOMAIN="${2:-${CMKAN_SOURCE_DOMAIN:-source}}"
 TARGET_DOMAIN="${3:-${CMKAN_TARGET_DOMAIN:-target}}"
 CONFIG_PATH="${4:-${CMKAN_CONFIG_PATH:-configs/custom_unpaired.example.yaml}}"
 WEIGHTS="${5:-${CMKAN_WEIGHTS:-logs/checkpoints/last.ckpt}}"
-OUTPUT_ROOT="${6:-${CMKAN_RESULTS_ROOT:-results/custom_unpaired}}"
+OUTPUT_ROOT="${6:-${CMKAN_RESULTS_ROOT:-../experiment/results/custom_unpaired}}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
 cd "$PROJECT_ROOT"

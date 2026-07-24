@@ -20,6 +20,7 @@ from cm_kan.ml.callbacks import GenerateCallback
 from lightning.pytorch.loggers import CSVLogger
 from cm_kan import cli
 from .custom_unpaired import override_data_root, override_face_mask_root
+from .experiment_paths import experiment_directory
 
 
 def add_parser(subparser: argparse) -> None:
@@ -92,25 +93,30 @@ def test(args: argparse.Namespace) -> None:
         override_face_mask_root(config, args.face_mask_root)
 
     config = Config(**config)
+    experiment_dir = experiment_directory(
+        config.save_dir,
+        config.experiment,
+    )
     inference_mode = config.pipeline.type != PipelineType.pair_based
     if not inference_mode:
         Logger.info(f'Inference mode: {inference_mode}. Use optimization while testing.')
     Logger.info('Config:')
     config.print()
+    Logger.info(f"Experiment directory: '{experiment_dir}'")
     
     dm = DataSelector.select(config)
     model = ModelSelector.select(config)
     pipeline = PipelineSelector.select(config, model, reverse_prediction=args.reverse)
 
     logger = CSVLogger(
-        save_dir=os.path.join(config.save_dir, config.experiment),
+        save_dir=experiment_dir,
         name='test_logs',
         version='',
     )
 
     trainer = L.Trainer(
         logger=logger,
-        default_root_dir=os.path.join(config.save_dir, config.experiment),
+        default_root_dir=experiment_dir,
         max_epochs=config.pipeline.params.epochs,
         accelerator=config.accelerator,
         callbacks=[
@@ -122,7 +128,7 @@ def test(args: argparse.Namespace) -> None:
         inference_mode=inference_mode,
     )
 
-    ckpt_path = os.path.join(config.save_dir, config.experiment, args.weights)
+    ckpt_path = os.path.join(experiment_dir, args.weights)
 
     if not os.path.exists(ckpt_path):
         raise ValueError(f"Checkpoint file '{ckpt_path}' does not exist.")

@@ -103,7 +103,7 @@ CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh
 
 The script passes `--reverse` as a flag (without a trailing `1`), writes test
 metrics separately from the training CSV, and saves both translation directions
-under `results/custom_unpaired/` by default.
+under `../experiment/results/custom_unpaired/` by default.
 
 For privacy-safe debugging without sharing images or filenames, print aggregate
 brightness, contrast, clipping, and RGB statistics:
@@ -113,8 +113,27 @@ python scripts/diagnose_prediction_stats.py
 ```
 
 The scripts default to `/home/share/y50063074/data` and
-`results/custom_unpaired`. Override them with `CMKAN_DATA_ROOT` and
+`../experiment/results/custom_unpaired`. Override them with `CMKAN_DATA_ROOT` and
 `CMKAN_RESULTS_ROOT` or the existing command-line arguments.
+
+All supplied configurations use `save_dir: ../experiment`. Start commands from
+the repository root (the shell launchers do this automatically). Training,
+validation, testing, prediction logs, checkpoints, figures, and default exported
+predictions then stay outside the repository:
+
+```text
+../experiment/
+├── <experiment>/
+│   ├── logs/
+│   ├── test_logs/
+│   ├── predict_logs/
+│   └── predictions/
+└── results/
+```
+
+This makes replacing the repository directory safe without replacing the
+sibling `experiment/` directory. Existing files under the legacy in-repository
+`experiments/` directory are not moved automatically.
 
 The loader recursively discovers common image formats. Training uses resize,
 random crop, and horizontal/vertical flip augmentation. Color-changing
@@ -208,7 +227,7 @@ resume a v5 or older checkpoint. Geometric augmentation applies the same resize,
 crop, and flip to each image and its sidecar mask.
 
 Before training updates, the callback saves
-`experiments/custom_one_to_one_reference_color_v6_face_skin/logs/figures/initial_source_to_target_0.png`;
+`../experiment/custom_one_to_one_reference_color_v6_face_skin/logs/figures/initial_source_to_target_0.png`;
 it should look like the source because the bounded residual head starts from
 identity. Reference-guided best checkpoints monitor
 `val_reference_selection_loss`. Run
@@ -226,9 +245,12 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --weights logs/checkpoints/last.ckpt \
   --input /absolute/path/to/source_images \
   --reference /absolute/path/to/target_reference.jpg \
-  --output results/reference_guided \
+  --output ../experiment/results/reference_guided \
   --batch_size 1
 ```
+
+If `--output` is omitted, `predict` writes images to
+`../experiment/<experiment>/predictions/`.
 
 The reference contributes global color and exposure statistics; it does not
 copy the reference scene or subject. See the

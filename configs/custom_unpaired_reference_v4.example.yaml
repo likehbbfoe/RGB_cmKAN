@@ -1,5 +1,5 @@
 experiment: custom_one_to_one_reference_color_v4_conditioned
-save_dir: experiments
+save_dir: ../experiment
 resume: false
 accelerator: auto
 

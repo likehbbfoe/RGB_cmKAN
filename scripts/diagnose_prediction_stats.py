@@ -22,6 +22,7 @@ IMAGE_EXTENSIONS = {
     ".tiff",
     ".webp",
 }
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,7 +44,15 @@ def parse_args() -> argparse.Namespace:
         "--results-root",
         type=Path,
         default=Path(
-            os.environ.get("CMKAN_RESULTS_ROOT", "results/custom_unpaired")
+            os.environ.get(
+                "CMKAN_RESULTS_ROOT",
+                str(
+                    PROJECT_ROOT.parent
+                    / "experiment"
+                    / "results"
+                    / "custom_unpaired"
+                ),
+            )
         ),
         help="Prediction root containing source_to_target and target_to_source",
     )

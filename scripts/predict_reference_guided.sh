@@ -7,7 +7,7 @@ REFERENCE_PATH="${1:-${CMKAN_REFERENCE:-}}"
 INPUT_PATH="${2:-${CMKAN_INPUT:-$DATA_ROOT/val/source}}"
 CONFIG_PATH="${3:-${CMKAN_CONFIG_PATH:-configs/custom_unpaired_reference.server.yaml}}"
 WEIGHTS="${4:-${CMKAN_WEIGHTS:-logs/checkpoints/last.ckpt}}"
-OUTPUT_PATH="${5:-${CMKAN_OUTPUT:-results/reference_guided/source_to_target}}"
+OUTPUT_PATH="${5:-${CMKAN_OUTPUT:-../experiment/results/reference_guided/source_to_target}}"
 BATCH_SIZE="${CMKAN_BATCH_SIZE:-1}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 

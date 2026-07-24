@@ -25,6 +25,7 @@ from .custom_unpaired import (
     override_data_root,
     override_face_mask_root,
 )
+from .experiment_paths import experiment_directory
 
 
 # Backwards compatibility for code that imported this private helper.
@@ -90,15 +91,20 @@ def train(args: argparse.Namespace) -> None:
     config = Config(**config)
     if config.data.type == DataType.custom_unpaired:
         L.seed_everything(config.data.params.seed, workers=True)
+    experiment_dir = experiment_directory(
+        config.save_dir,
+        config.experiment,
+    )
     Logger.info('Config:')
     config.print()
+    Logger.info(f"Experiment directory: '{experiment_dir}'")
     
     dm = DataSelector.select(config)
     model = ModelSelector.select(config)
     pipeline = PipelineSelector.select(config, model)
 
     logger = CSVLogger(
-        save_dir=os.path.join(config.save_dir, config.experiment),
+        save_dir=experiment_dir,
         name='logs',
         version='',
     )
@@ -121,7 +127,7 @@ def train(args: argparse.Namespace) -> None:
 
     trainer = L.Trainer(
         logger=logger,
-        default_root_dir=os.path.join(config.save_dir, config.experiment),
+        default_root_dir=experiment_dir,
         max_epochs=config.pipeline.params.epochs,
         accelerator=config.accelerator,
         callbacks=[
@@ -142,7 +148,10 @@ def train(args: argparse.Namespace) -> None:
         ],
     )
 
-    ckpt_path = os.path.join(config.save_dir, config.experiment, 'logs/checkpoints/last.ckpt')
+    ckpt_path = os.path.join(
+        experiment_dir,
+        'logs/checkpoints/last.ckpt',
+    )
 
     trainer.fit(
         model=pipeline, 

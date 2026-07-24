@@ -531,7 +531,7 @@ pipeline:
 
 启动时先检查这两个基准文件：
 
-- `experiments/custom_one_to_one_reference_color_v3_stable/logs/figures/initial_source_to_target_0.png`：
+- `../experiment/custom_one_to_one_reference_color_v3_stable/logs/figures/initial_source_to_target_0.png`：
   训练开始、任何优化器更新之前保存的零更新基线。由于输出头从恒等映射开始，它必须
   与 source 接近；若这里已经是黑图，应先检查配置和初始化，不能继续训练。
 - 同目录的 `source_to_target_0.png`：完成 epoch 0 的第一轮非对抗生成器稳定训练后
@@ -657,7 +657,7 @@ v5 使用独立实验，保留所有旧模型：
 ```text
 configs/custom_unpaired_reference_v5_skin.server.yaml
 scripts/train_custom_unpaired_reference_v5_skin.sh
-experiments/custom_one_to_one_reference_color_v5_skin/
+../experiment/custom_one_to_one_reference_color_v5_skin/
 ```
 
 关键配置为：
@@ -689,7 +689,7 @@ python scripts/preview_skin_masks.py
 结果只保存在服务器：
 
 ```text
-experiments/custom_one_to_one_reference_color_v5_skin/logs/figures/skin_mask_preview.png
+../experiment/custom_one_to_one_reference_color_v5_skin/logs/figures/skin_mask_preview.png
 ```
 
 每行依次是 `source | source mask | target | target mask`。白色应主要覆盖脸、手等肤色
@@ -921,7 +921,7 @@ v6 使用新的实验目录：
 ```text
 configs/custom_unpaired_reference_v6_face_skin.server.yaml
 scripts/train_custom_unpaired_reference_v6_face_skin.sh
-experiments/custom_one_to_one_reference_color_v6_face_skin/
+../experiment/custom_one_to_one_reference_color_v6_face_skin/
 ```
 
 必须保持 `resume: false` 并从零训练，不要续训 v5 或之前已经偏红的 checkpoint。
@@ -931,7 +931,7 @@ v1–v5 的配置、checkpoint、CSV 和图片均不会被覆盖。
 
 ```bash
 python scripts/report_reference_metrics.py \
-  experiments/custom_one_to_one_reference_color_v6_face_skin/logs/metrics.csv \
+  ../experiment/custom_one_to_one_reference_color_v6_face_skin/logs/metrics.csv \
   --skin
 ```
 
@@ -942,7 +942,7 @@ python scripts/report_reference_metrics.py \
 
 ```bash
 python scripts/report_reference_metrics.py \
-  experiments/custom_one_to_one_reference_color_v6_face_skin/logs/metrics.csv \
+  ../experiment/custom_one_to_one_reference_color_v6_face_skin/logs/metrics.csv \
   --face
 ```
 
@@ -974,6 +974,9 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --output /absolute/path/to/reference_results \
   --batch_size 1
 ```
+
+省略 `--output` 时，图片默认写入
+`../experiment/<experiment>/predictions/`。
 
 推理必须使用训练这个 checkpoint 时的同一份 YAML。v6 checkpoint 应搭配 v6
 YAML，v5/v4 checkpoint 仍分别搭配 v5/v4 YAML。face mask 只约束训练期的 skin
@@ -1010,7 +1013,7 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/warm_target.jpg \
-  --output results/reference_warm \
+  --output ../experiment/results/reference_warm \
   --batch_size 1
 
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
@@ -1018,7 +1021,7 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/cool_target.jpg \
-  --output results/reference_cool \
+  --output ../experiment/results/reference_cool \
   --batch_size 1
 ```
 
@@ -1120,12 +1123,41 @@ python main.py train \
 当前示例已改为 `crop_size: 256`、`resize_size: 286`、`batch_size: 2`，避免
 32×32 patch 无法提供全局曝光上下文。显存允许时可用 `512/544` 获取更大上下文。
 
+## 📁 统一实验保存目录
+
+所有仓库内配置和代码默认值均使用：
+
+```yaml
+save_dir: ../experiment
+```
+
+假设项目根目录为 `/path/cmKAN`，所有新实验会保存到同级的
+`/path/experiment`，而不是 `/path/cmKAN` 内部。请从项目根目录执行
+`python main.py ...`；仓库提供的所有 shell 启动脚本都会自动切换到项目根目录。
+
+默认目录结构为：
+
+```text
+../experiment/
+├── <experiment>/
+│   ├── logs/                   # 训练 CSV、checkpoint、figures
+│   ├── test_logs/              # 测试指标与预览
+│   ├── predict_logs/           # 推理日志
+│   └── predictions/            # main.py predict 未传 --output 时的图片
+└── results/                    # 一键测试与推理脚本的默认整图结果
+```
+
+因此更新代码时可以直接覆盖整个 `cmKAN/` 项目目录，但不要删除或覆盖它旁边的
+`experiment/`。服务器数据目录和 `data_face_masks/` 也保持在项目外部，不受影响。
+旧版已经写入 `cmKAN/experiments/` 的 checkpoint 和日志不会自动迁移；需要保留时，
+请在覆盖项目之前先将它们复制到同级 `experiment/`，并保持内部实验目录名不变。
+
 ## 📊 日志与断点续训
 
 当前训练使用原生 `CSVLogger`，默认输出：
 
 ```text
-experiments/custom_unpaired/
+../experiment/<experiment>/
 └── logs/
     ├── checkpoints/
     │   └── last.ckpt
@@ -1247,7 +1279,7 @@ python scripts/report_reference_metrics.py
 
 脚本只读取 `metrics.csv`，不读取图片、文件名或数据路径，并输出一行可以直接
 复制的汇总结果。默认路径是
-`experiments/custom_one_to_one_reference_color_v6_face_skin/logs/metrics.csv`；如果
+`../experiment/custom_one_to_one_reference_color_v6_face_skin/logs/metrics.csv`；如果
 实验目录不同，可以把实际 CSV 路径作为第一个参数：
 
 ```bash
@@ -1333,7 +1365,7 @@ resume: true
 然后执行相同训练命令。程序会尝试读取：
 
 ```text
-experiments/<experiment>/logs/checkpoints/last.ckpt
+../experiment/<experiment>/logs/checkpoints/last.ckpt
 ```
 
 `last.ckpt` 是最新一轮的完整训练状态（包含优化器、学习率调度器和 epoch），断点续训
@@ -1358,7 +1390,7 @@ CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh
 ```
 
 服务器默认数据目录已经设置为 `/home/share/y50063074/data`，默认结果目录是
-`results/custom_unpaired`，因此不需要输入路径参数。
+`../experiment/results/custom_unpaired`，因此不需要输入路径参数。
 
 脚本参数顺序如下：
 
@@ -1381,7 +1413,7 @@ CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh \
   target \
   configs/custom_unpaired.example.yaml \
   logs/checkpoints/last.ckpt \
-  results/my_experiment
+  ../experiment/results/my_experiment
 ```
 
 其中 `WEIGHTS` 相对于配置中的
@@ -1391,19 +1423,19 @@ CUDA_VISIBLE_DEVICES=7 ./scripts/test_custom_unpaired.sh \
 结果位置：
 
 ```text
-experiments/<experiment>/test_logs/
+../experiment/<experiment>/test_logs/
 ├── metrics.csv                 # test_cycle_loss、test_identity_loss、test_loss
 └── figures/
     └── test_source_to_target_*.png
                                 # source、迁移结果、target、xy 色度散点图四列
 
-results/my_experiment/
+../experiment/results/my_experiment/
 ├── source_to_target/           # 正向整图结果
 └── target_to_source/           # 反向整图结果
 ```
 
 测试和推理使用独立的 `test_logs`、`predict_logs`，不会覆盖
-`experiments/<experiment>/logs/metrics.csv` 中的训练记录。如果 checkpoint 不存在，
+`../experiment/<experiment>/logs/metrics.csv` 中的训练记录。如果 checkpoint 不存在，
 程序会直接报错退出，不再悄悄使用未训练权重。
 
 训练和测试的非配对预览只显示正向迁移。图片中：
@@ -1476,7 +1508,7 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --batch_size 1
 ```
 
-`--weights` 是相对于 `experiments/<experiment>/` 的路径。
+`--weights` 是相对于 `../experiment/<experiment>/` 的路径。
 
 ### target → source
 

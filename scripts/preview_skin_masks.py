@@ -21,9 +21,14 @@ IMAGE_SUFFIXES = {
     ".tiff",
     ".webp",
 }
-DEFAULT_OUTPUT = Path(
-    "experiments/custom_one_to_one_reference_color_v5_skin/"
-    "logs/figures/skin_mask_preview.png"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_OUTPUT = (
+    PROJECT_ROOT.parent
+    / "experiment"
+    / "custom_one_to_one_reference_color_v5_skin"
+    / "logs"
+    / "figures"
+    / "skin_mask_preview.png"
 )
 
 
