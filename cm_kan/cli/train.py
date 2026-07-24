@@ -20,7 +20,11 @@ from lightning.pytorch.callbacks import (
 from cm_kan.ml.callbacks import GenerateCallback
 from lightning.pytorch.loggers import CSVLogger
 from cm_kan import cli
-from .custom_unpaired import domain_path, override_data_root
+from .custom_unpaired import (
+    domain_path,
+    override_data_root,
+    override_face_mask_root,
+)
 
 
 # Backwards compatibility for code that imported this private helper.
@@ -58,6 +62,12 @@ def add_parser(subparser: argparse) -> None:
         help="Target-domain directory name below train/ and val/",
         default="target",
     )
+    parser.add_argument(
+        "--face-mask-root",
+        type=str,
+        help="Override mirrored face-mask sidecar root for custom data",
+        default=None,
+    )
 
     parser.set_defaults(func=train)
 
@@ -74,6 +84,8 @@ def train(args: argparse.Namespace) -> None:
             args.source_domain,
             args.target_domain,
         )
+    if args.face_mask_root is not None:
+        override_face_mask_root(config, args.face_mask_root)
 
     config = Config(**config)
     if config.data.type == DataType.custom_unpaired:

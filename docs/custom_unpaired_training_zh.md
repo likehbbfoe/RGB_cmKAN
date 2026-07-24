@@ -758,13 +758,216 @@ cm_kan/core/selector/pipeline.py
 cm_kan/ml/pipelines/unsupervised.py
 ```
 
+### v6：复杂米黄背景下使用人脸 ROI
+
+如果背景中有米色、黄色、木材或暖色衣服，v5 的纯颜色规则无法可靠区分“皮肤”和
+“像皮肤的背景”。六组预览中已有两组覆盖率超过 `50%`，此时继续收紧 YCbCr
+阈值也会同时丢掉真实肤色，不建议直接用 v5 通宵训练。
+
+v6 先在服务器本地检测人脸，保存独立的 face-ROI sidecar mask；训练时再计算：
+
+```text
+最终肤色统计区域 = v5 肤色颜色候选 ∩ v6 人脸 ROI
+```
+
+人脸大小比较接近有利于检测稳定。检测器只负责给出粗略空间范围，肤色仍由原来的
+颜色规则筛选；它不会向模型输入人脸身份特征，也不会将 target 的五官或纹理复制到
+source。v6 沿用 v5 的 loss 权重、局部红斑保护和一一对应采样，只新增空间限制。
+
+#### 第一步：生成 sidecar mask
+
+在训练服务器的仓库根目录执行：
+
+```bash
+python scripts/generate_face_masks.py
+```
+
+默认会从 `/home/share/y50063074/data` 读取数据，在
+`/home/share/y50063074/data_face_masks` 写入 mask，并抽样保存 30 组预览。
+预览会优先纳入漏检、ROI 面积异常和 ROI 内肤色密度极端的高风险样本。路径不同时
+再使用 `--data-root`、`--output-root` 覆盖。
+
+脚本使用项目已有的 OpenCV 和
+`haarcascade_frontalface_default.xml`，不下载在线模型。多人脸时选择面积最大的
+检测框，并在框内生成稍微收紧的椭圆 ROI。输出目录严格镜像原数据目录：
+
+```text
+/home/share/y50063074/data_face_masks/
+├── face_mask_preview.png
+├── train/
+│   ├── source/
+│   │   ├── image_001.png
+│   │   └── 子目录/another_image.png
+│   └── target/
+│       └── ...
+└── val/
+    ├── source/
+    └── target/
+```
+
+每个 mask 的相对路径与原图片一致，但扩展名统一改为 `.png`。例如：
+
+```text
+原图：/home/share/y50063074/data/train/source/scene_01/a.jpg
+mask：/home/share/y50063074/data_face_masks/train/source/scene_01/a.png
+```
+
+生成结束会按 `split/domain` 打印 `total/detected/missed`。检测不到人脸时仍会写出
+同尺寸全黑单通道 PNG：
+
+- mask 文件缺失：数据不完整，训练启动时立即报错，不允许静默退回 v5；
+- mask 文件存在但全黑：该样本仅跳过 skin loss，cycle、identity、对抗、曝光、
+  reflectance、PatchNCE 等其他 loss 仍照常训练。
+
+#### 第二步：人工检查
+
+打开：
+
+```text
+/home/share/y50063074/data_face_masks/face_mask_preview.png
+```
+
+预览每组为：
+
+```text
+original | face ROI | ROI × skin mask | final overlay
+```
+
+第三列白色才是实际进入肤色统计的区域，黑色表示排除；最后一列只把这个最终区域
+保持明亮，其余区域压暗。开始训练前至少确认：
+
+- 白色椭圆覆盖脸部，没有大面积罩住米黄背景；
+- source 和 target 的脸都能检测到；
+- 重点检查侧脸、小脸、遮挡和多人场景；
+- `missed` 不是异常高；全黑 mask 过多会使 `skin_valid` 很低，肤色监督等于很少
+  生效。
+
+不要只看“是否检测到了脸”，还要看椭圆位置是否正确。若预览明显错框，应先处理
+mask，不要直接启动长时间训练。错框到背景的样本应为 0；漏检是安全弃权，错检
+则会提供错误监督。可以把错框对应的 sidecar PNG 手工改成全黑或正确的人脸区域。
+生成脚本默认保留已有 sidecar，因此重跑不会抹掉人工修改；只有显式加入
+`--overwrite` 才会全部重新检测。图片和 mask 都只保存在服务器，不需要上传。
+预览旁边还会生成 `face_mask_preview.tsv`，其中按行号记录对应的本地 image/mask
+路径；发现错框时可据此找到需要改黑或修正的 sidecar。
+
+#### 第三步：从零训练 v6
+
+默认数据和 mask 路径已经写入 server YAML，直接执行：
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=7 \
+./scripts/train_custom_unpaired_reference_v6_face_skin.sh
+```
+
+v6 启动脚本的位置参数与 v5 保持兼容，另增加第 5 个可选参数：
+
+```text
+1：data root
+2：source 目录名
+3：target 目录名
+4：config 路径
+5：face mask root
+```
+
+自定义路径示例：
+
+```bash
+CUDA_VISIBLE_DEVICES=7 \
+./scripts/train_custom_unpaired_reference_v6_face_skin.sh \
+  /absolute/path/to/data \
+  source \
+  target \
+  configs/custom_unpaired_reference_v6_face_skin.server.yaml \
+  /absolute/path/to/data_face_masks
+```
+
+也可以只覆盖环境变量：
+
+```bash
+CMKAN_DATA_ROOT=/absolute/path/to/data \
+CMKAN_FACE_MASK_ROOT=/absolute/path/to/data_face_masks \
+CUDA_VISIBLE_DEVICES=7 \
+./scripts/train_custom_unpaired_reference_v6_face_skin.sh
+```
+
+v6 的关键开关为：
+
+```yaml
+data:
+  params:
+    face_mask_root: /home/share/y50063074/data_face_masks
+
+pipeline:
+  params:
+    reference_skin_require_face_mask: true
+    reference_face_min_fraction: 0.01
+    reference_face_max_fraction: 0.35
+    reference_skin_face_density_min: 0.10
+    reference_skin_face_density_max: 0.90
+    reference_face_pair_area_ratio_min: 0.5
+    reference_face_pair_area_ratio_max: 2.0
+    reference_face_pair_center_distance_max: 0.30
+```
+
+`reference_skin_require_face_mask: true` 保证训练绝不静默退回纯颜色 mask。图片与
+sidecar mask 会使用完全相同的 resize、随机 crop 和 flip，因此裁剪增强之后仍然
+对齐。其余门限会弃权以下高风险样本：人脸 ROI 太小或太大、ROI 内几乎全是
+“肤色”或几乎没有肤色、source/target 人脸面积相差超过 2 倍、两个人脸中心相距
+超过归一化图幅的 `0.30`。它们只关闭该样本的 skin loss，不会关闭其他训练目标。
+
+v6 使用新的实验目录：
+
+```text
+configs/custom_unpaired_reference_v6_face_skin.server.yaml
+scripts/train_custom_unpaired_reference_v6_face_skin.sh
+experiments/custom_one_to_one_reference_color_v6_face_skin/
+```
+
+必须保持 `resume: false` 并从零训练，不要续训 v5 或之前已经偏红的 checkpoint。
+v1–v5 的配置、checkpoint、CSV 和图片均不会被覆盖。
+
+完成第一次验证后仍运行：
+
+```bash
+python scripts/report_reference_metrics.py \
+  experiments/custom_one_to_one_reference_color_v6_face_skin/logs/metrics.csv \
+  --skin
+```
+
+重点确认 `skin_valid` 明显大于 `0`。它较低时先检查 `missed` 和黑 mask 数量，而
+不是盲目增大肤色 loss 权重。
+
+只查看 v6 人脸门限时，用一条较短的报告：
+
+```bash
+python scripts/report_reference_metrics.py \
+  experiments/custom_one_to_one_reference_color_v6_face_skin/logs/metrics.csv \
+  --face
+```
+
+它只输出 `skin_valid`、source/target 人脸面积、ROI 内肤色密度、两侧面积比和中心
+距离，方便直接复制数值排查。
+
+服务器不能拉取仓库时，除了覆盖更新后的 `cm_kan/`，还要复制：
+
+```text
+configs/custom_unpaired_reference_v6_face_skin.server.yaml
+scripts/generate_face_masks.py
+scripts/train_custom_unpaired_reference_v6_face_skin.sh
+scripts/report_reference_metrics.py
+```
+
+如果服务器路径不是默认值，修改 YAML 中的
+`data.params.face_mask_root`，或者把 mask root 作为训练脚本第 5 个参数传入。
+
 ### 用一张参考图推理
 
 下面会把同一张参考图广播给输入目录中的所有 source 图片：
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v5_skin.server.yaml \
+  --config configs/custom_unpaired_reference_v6_face_skin.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /absolute/path/to/source_images \
   --reference /absolute/path/to/target_reference.jpg \
@@ -772,9 +975,11 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --batch_size 1
 ```
 
-推理必须使用训练这个 checkpoint 时的同一份 YAML。v5 checkpoint 应搭配 v5
-YAML，旧 v4 checkpoint 仍搭配 v4 YAML。`reference_direct_conditioning`、`output_mode` 与
-`max_logit_shift` 都是配置行为；配置不一致会改变模型结构、输出范围或颜色变化幅度。
+推理必须使用训练这个 checkpoint 时的同一份 YAML。v6 checkpoint 应搭配 v6
+YAML，v5/v4 checkpoint 仍分别搭配 v5/v4 YAML。face mask 只约束训练期的 skin
+loss，普通推理不需要为输入图片再生成 mask。`reference_direct_conditioning`、
+`output_mode` 与 `max_logit_shift` 都是配置行为；配置不一致会改变模型结构、输出
+范围或颜色变化幅度。
 
 参考图片可以与 source 内容完全不同，建议选择曝光正常、白平衡和肤色风格明确、
 没有大面积纯黑或过曝区域的真实 target。`--input` 可以直接指向一张 source
@@ -786,12 +991,12 @@ YAML，旧 v4 checkpoint 仍搭配 v4 YAML。`reference_direct_conditioning`、`
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 \
-CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v5_skin.server.yaml \
+CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v6_face_skin.server.yaml \
 ./scripts/predict_reference_guided.sh /absolute/path/to/target_reference.jpg
 ```
 
 该推理封装脚本为了兼容旧 checkpoint，默认仍指向 v2 配置；使用 v3 checkpoint 时
-必须显式传 v3 YAML，使用 v4/v5 checkpoint 时也必须显式传对应 YAML；也可以
+必须显式传 v3 YAML，使用 v4/v5/v6 checkpoint 时也必须显式传对应 YAML；也可以
 直接使用前面的完整 `main.py predict` 命令。
 
 ### 同一 source 更换参考图的对照检验
@@ -801,7 +1006,7 @@ CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v5_skin.server.yaml \
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v5_skin.server.yaml \
+  --config configs/custom_unpaired_reference_v6_face_skin.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/warm_target.jpg \
@@ -809,7 +1014,7 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --batch_size 1
 
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v5_skin.server.yaml \
+  --config configs/custom_unpaired_reference_v6_face_skin.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/cool_target.jpg \
@@ -1042,7 +1247,7 @@ python scripts/report_reference_metrics.py
 
 脚本只读取 `metrics.csv`，不读取图片、文件名或数据路径，并输出一行可以直接
 复制的汇总结果。默认路径是
-`experiments/custom_one_to_one_reference_color_v5_skin/logs/metrics.csv`；如果
+`experiments/custom_one_to_one_reference_color_v6_face_skin/logs/metrics.csv`；如果
 实验目录不同，可以把实际 CSV 路径作为第一个参数：
 
 ```bash

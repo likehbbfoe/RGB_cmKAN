@@ -11,8 +11,8 @@ from cm_kan.ml.utils.io import read_rgb_image
 
 ImageTransform = Callable[[np.ndarray], torch.Tensor]
 PairedImageTransform = Callable[
-    [np.ndarray, np.ndarray],
-    tuple[torch.Tensor, torch.Tensor],
+    ...,
+    tuple[torch.Tensor, ...],
 ]
 ALIGNED_PAIRING_MODES = ("weak_aligned", "one_to_one")
 
@@ -211,6 +211,70 @@ def _ensure_rgb(image: np.ndarray, path: Path) -> np.ndarray:
     return np.ascontiguousarray(image)
 
 
+def _face_mask_path(
+    image_path: Path,
+    image_root: Path,
+    mask_root: Path,
+) -> Path:
+    """Map one image to its PNG sidecar below a mirrored mask directory."""
+    try:
+        relative_path = image_path.relative_to(image_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Image path '{image_path}' is not inside domain root '{image_root}'"
+        ) from exc
+    return mask_root / relative_path.with_suffix(".png")
+
+
+def _build_face_mask_paths(
+    image_paths: Sequence[Path],
+    image_root: Path,
+    mask_root: Path,
+) -> tuple[Path, ...]:
+    mask_paths = tuple(
+        _face_mask_path(path, image_root, mask_root)
+        for path in image_paths
+    )
+    missing_paths = [
+        path
+        for path in mask_paths
+        if not path.is_file()
+    ]
+    if missing_paths:
+        examples = ", ".join(str(path) for path in missing_paths[:3])
+        suffix = " ..." if len(missing_paths) > 3 else ""
+        raise FileNotFoundError(
+            "Missing face-mask sidecars. A detector failure must be represented "
+            "by an existing all-black PNG; missing files are configuration "
+            f"errors. Missing {len(missing_paths)} file(s): {examples}{suffix}"
+        )
+    return mask_paths
+
+
+def _ensure_face_mask(
+    mask: np.ndarray,
+    image: np.ndarray,
+    path: Path,
+) -> np.ndarray:
+    """Return a binary HxW float mask matching its source image."""
+    if mask.ndim == 3:
+        if mask.shape[-1] not in (1, 3, 4):
+            raise ValueError(
+                f"Expected a grayscale/RGB mask at '{path}', got {mask.shape}"
+            )
+        mask = mask[..., 0]
+    if mask.ndim != 2:
+        raise ValueError(f"Expected a 2D face mask at '{path}', got {mask.shape}")
+    if mask.shape != image.shape[:2]:
+        raise ValueError(
+            f"Face mask '{path}' has shape {mask.shape}, but its image has "
+            f"shape {image.shape[:2]}"
+        )
+    if not np.isfinite(mask).all():
+        raise ValueError(f"Face mask '{path}' contains non-finite values")
+    return np.ascontiguousarray((mask > 0).astype(np.float32))
+
+
 class UnpairedImageDataset(Dataset):
     """Load independent images from source and target color domains."""
 
@@ -225,6 +289,8 @@ class UnpairedImageDataset(Dataset):
         target_root: Path | None = None,
         pairing_mode: str = "random",
         paired_transform: PairedImageTransform | None = None,
+        source_mask_root: Path | None = None,
+        target_mask_root: Path | None = None,
     ) -> None:
         if not source_paths:
             raise ValueError("source_paths must contain at least one image")
@@ -251,6 +317,36 @@ class UnpairedImageDataset(Dataset):
         expanded_target_root = (
             Path(target_root).expanduser() if target_root is not None else None
         )
+        has_source_masks = source_mask_root is not None
+        has_target_masks = target_mask_root is not None
+        if has_source_masks != has_target_masks:
+            raise ValueError(
+                "source_mask_root and target_mask_root must be provided together"
+            )
+        self.source_mask_paths = None
+        self.target_mask_paths = None
+        if has_source_masks:
+            if expanded_source_root is None or expanded_target_root is None:
+                raise ValueError(
+                    "source_root and target_root are required for face masks"
+                )
+            if paired_transform is None:
+                raise ValueError(
+                    "A paired_transform is required to keep face masks aligned "
+                    "with image augmentation"
+                )
+            expanded_source_mask_root = Path(source_mask_root).expanduser()
+            expanded_target_mask_root = Path(target_mask_root).expanduser()
+            self.source_mask_paths = _build_face_mask_paths(
+                self.source_paths,
+                expanded_source_root,
+                expanded_source_mask_root,
+            )
+            self.target_mask_paths = _build_face_mask_paths(
+                self.target_paths,
+                expanded_target_root,
+                expanded_target_mask_root,
+            )
         self.aligned_target_indices = None
         if self.pairing_mode in ALIGNED_PAIRING_MODES:
             if expanded_source_root is None or expanded_target_root is None:
@@ -334,10 +430,31 @@ class UnpairedImageDataset(Dataset):
         source = _ensure_rgb(read_rgb_image(str(source_path)), source_path)
         target = _ensure_rgb(read_rgb_image(str(target_path)), target_path)
 
-        if (
-            self.pairing_mode in ALIGNED_PAIRING_MODES
-            and self.paired_transform is not None
-        ):
+        if self.source_mask_paths is not None:
+            source_mask_path = self.source_mask_paths[source_index]
+            target_mask_path = self.target_mask_paths[target_index]
+            source_face_mask = _ensure_face_mask(
+                read_rgb_image(str(source_mask_path)),
+                source,
+                source_mask_path,
+            )
+            target_face_mask = _ensure_face_mask(
+                read_rgb_image(str(target_mask_path)),
+                target,
+                target_mask_path,
+            )
+            (
+                transformed_source,
+                transformed_target,
+                transformed_source_face_mask,
+                transformed_target_face_mask,
+            ) = self.paired_transform(
+                source,
+                target,
+                source_face_mask,
+                target_face_mask,
+            )
+        elif self.paired_transform is not None:
             transformed_source, transformed_target = self.paired_transform(
                 source,
                 target,
@@ -346,10 +463,16 @@ class UnpairedImageDataset(Dataset):
             transformed_source = self.transform(source)
             transformed_target = self.transform(target)
 
-        return {
+        sample = {
             "source": transformed_source,
             "target": transformed_target,
         }
+        if self.source_mask_paths is not None:
+            sample.update({
+                "source_face_mask": transformed_source_face_mask,
+                "target_face_mask": transformed_target_face_mask,
+            })
+        return sample
 
     def __len__(self) -> int:
         if self.pairing_mode in ALIGNED_PAIRING_MODES:

@@ -7,10 +7,14 @@ import pytest
 import torch
 
 from cm_kan.cli.train import _domain_path
-from cm_kan.cli.custom_unpaired import override_data_root
+from cm_kan.cli.custom_unpaired import (
+    override_data_root,
+    override_face_mask_root,
+)
 from cm_kan.core.config.data import CustomUnpairedDataParams, PairingMode
 from cm_kan.ml.datasets.custom_unpaired import CustomUnpairedDataModule
 from cm_kan.ml.datasets.custom_unpaired.img_datamodule import (
+    FaceAwareEvalTransform,
     WeakAlignedTrainTransform,
 )
 from cm_kan.ml.datasets.custom_unpaired.img_dataset import (
@@ -503,6 +507,50 @@ def test_weak_aligned_transform_supports_different_aspect_ratios() -> None:
     assert transform._crop_offset(80, 16, 0.25) == 16
 
 
+def test_face_masks_follow_real_resize_crop_and_flip() -> None:
+    transform = WeakAlignedTrainTransform(
+        resize_size=24,
+        crop_size=16,
+        horizontal_flip_probability=1.0,
+        vertical_flip_probability=1.0,
+    )
+    source_mask = np.zeros((18, 30), dtype=np.float32)
+    source_mask[3:16, 5:25] = 1
+    target_mask = np.zeros((30, 18), dtype=np.float32)
+    target_mask[5:25, 3:16] = 1
+    source = np.repeat(
+        (source_mask * 255).astype(np.uint8)[..., None],
+        repeats=3,
+        axis=-1,
+    )
+    target = np.repeat(
+        (target_mask * 255).astype(np.uint8)[..., None],
+        repeats=3,
+        axis=-1,
+    )
+
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        source, target, source_mask, target_mask = transform(
+            source,
+            target,
+            source_mask,
+            target_mask,
+        )
+
+    for image, mask in (
+        (source, source_mask),
+        (target, target_mask),
+    ):
+        image_region = image[:1] > 0.5
+        mask_region = mask > 0.5
+        union = (image_region | mask_region).sum().item()
+        intersection = (image_region & mask_region).sum().item()
+        assert intersection / max(union, 1) > 0.90
+        assert mask.dtype == torch.float32
+        assert set(mask.unique().tolist()) <= {0.0, 1.0}
+
+
 def test_pairing_mode_config_accepts_weak_aligned() -> None:
     params = CustomUnpairedDataParams(pairing_mode="weak_aligned")
 
@@ -520,4 +568,195 @@ def test_pairing_mode_is_appended_to_data_module_signature() -> None:
         inspect.signature(CustomUnpairedDataModule).parameters
     )
 
-    assert parameter_names[-1] == "pairing_mode"
+    assert parameter_names[-2:] == ["pairing_mode", "face_mask_root"]
+
+
+def _write_face_mask(path: Path, mask: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    imageio.imwrite(path, (mask.astype(np.uint8) * 255))
+
+
+def test_face_mask_sidecars_follow_relative_paths_and_stay_synchronized(
+    tmp_path: Path,
+) -> None:
+    train_source = tmp_path / "data" / "train" / "source"
+    train_target = tmp_path / "data" / "train" / "target"
+    val_source = tmp_path / "data" / "val" / "source"
+    val_target = tmp_path / "data" / "val" / "target"
+    mask_root = tmp_path / "face_masks"
+
+    mask = np.zeros((24, 32), dtype=np.uint8)
+    mask[4:20, 6:22] = 1
+    image = np.repeat((mask * 255)[..., None], repeats=3, axis=-1)
+    for split, source_dir, target_dir in (
+        ("train", train_source, train_target),
+        ("val", val_source, val_target),
+    ):
+        for domain, directory in (
+            ("source", source_dir),
+            ("target", target_dir),
+        ):
+            image_path = directory / "scene" / "same.bmp"
+            image_path.parent.mkdir(parents=True, exist_ok=True)
+            imageio.imwrite(image_path, image)
+            _write_face_mask(
+                mask_root / split / domain / "scene" / "same.png",
+                mask,
+            )
+
+    data_module = CustomUnpairedDataModule(
+        source_dir=str(train_source),
+        target_dir=str(train_target),
+        val_source_dir=str(val_source),
+        val_target_dir=str(val_target),
+        crop_size=16,
+        resize_size=24,
+        horizontal_flip_probability=1.0,
+        num_workers=0,
+        pairing_mode="one_to_one",
+        face_mask_root=str(mask_root),
+    )
+    data_module.setup("fit")
+
+    train_sample = data_module.train_dataset[0]
+    assert set(train_sample) == {
+        "source",
+        "target",
+        "source_face_mask",
+        "target_face_mask",
+    }
+    assert torch.equal(
+        train_sample["source_face_mask"],
+        train_sample["target_face_mask"],
+    )
+    assert torch.equal(
+        (train_sample["source"][:1] > 0.5).float(),
+        train_sample["source_face_mask"],
+    )
+
+    val_sample = data_module.val_dataset[0]
+    assert torch.equal(
+        (val_sample["source"][:1] > 0.5).float(),
+        val_sample["source_face_mask"],
+    )
+    assert isinstance(
+        data_module.face_aware_eval_transform,
+        FaceAwareEvalTransform,
+    )
+
+
+def test_missing_face_mask_sidecar_fails_fast(tmp_path: Path) -> None:
+    train_source = tmp_path / "data" / "train" / "source"
+    train_target = tmp_path / "data" / "train" / "target"
+    val_source = tmp_path / "data" / "val" / "source"
+    val_target = tmp_path / "data" / "val" / "target"
+    mask_root = tmp_path / "face_masks"
+    for directory in (
+        train_source,
+        train_target,
+        val_source,
+        val_target,
+    ):
+        _write_image(directory / "same.png", 100)
+
+    data_module = CustomUnpairedDataModule(
+        source_dir=str(train_source),
+        target_dir=str(train_target),
+        val_source_dir=str(val_source),
+        val_target_dir=str(val_target),
+        crop_size=16,
+        resize_size=20,
+        num_workers=0,
+        pairing_mode="one_to_one",
+        face_mask_root=str(mask_root),
+    )
+
+    with pytest.raises(FileNotFoundError, match="all-black PNG"):
+        data_module.setup("fit")
+
+
+def test_all_black_face_mask_is_a_valid_sidecar(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_mask_root = tmp_path / "masks" / "source"
+    target_mask_root = tmp_path / "masks" / "target"
+    _write_image(source_root / "image.png", 80)
+    _write_image(target_root / "image.png", 120)
+    black = np.zeros((24, 32), dtype=np.uint8)
+    _write_face_mask(source_mask_root / "image.png", black)
+    _write_face_mask(target_mask_root / "image.png", black)
+
+    dataset = UnpairedImageDataset(
+        source_paths=[source_root / "image.png"],
+        target_paths=[target_root / "image.png"],
+        transform=lambda image: torch.from_numpy(image.copy()),
+        random_pairing=False,
+        source_root=source_root,
+        target_root=target_root,
+        pairing_mode="one_to_one",
+        paired_transform=FaceAwareEvalTransform(
+            resize_size=20,
+            crop_size=16,
+        ),
+        source_mask_root=source_mask_root,
+        target_mask_root=target_mask_root,
+    )
+
+    sample = dataset[0]
+    assert sample["source_face_mask"].count_nonzero().item() == 0
+    assert sample["target_face_mask"].count_nonzero().item() == 0
+
+
+def test_face_mask_root_override_updates_custom_data_params() -> None:
+    config = {
+        "data": {
+            "type": "custom_unpaired",
+            "train": {"source": "source", "target": "target"},
+        }
+    }
+
+    override_face_mask_root(config, "/private/masks")
+
+    assert config["data"]["params"]["face_mask_root"] == "/private/masks"
+
+
+def test_train_real_image_root_matches_domain_level_sidecars(
+    tmp_path: Path,
+) -> None:
+    train_source = tmp_path / "data/train/source/real"
+    train_target = tmp_path / "data/train/target/real"
+    val_source = tmp_path / "data/val/source"
+    val_target = tmp_path / "data/val/target"
+    mask_root = tmp_path / "face_masks"
+    black = np.zeros((24, 32), dtype=np.uint8)
+
+    for split, domain, image_root in (
+        ("train", "source", train_source),
+        ("train", "target", train_target),
+        ("val", "source", val_source),
+        ("val", "target", val_target),
+    ):
+        _write_image(image_root / "scene/image.png", 100)
+        _write_face_mask(
+            mask_root / split / domain / "scene/image.png",
+            black,
+        )
+
+    data_module = CustomUnpairedDataModule(
+        source_dir=str(train_source),
+        target_dir=str(train_target),
+        val_source_dir=str(val_source),
+        val_target_dir=str(val_target),
+        crop_size=16,
+        resize_size=20,
+        num_workers=0,
+        pairing_mode="one_to_one",
+        face_mask_root=str(mask_root),
+    )
+    data_module.setup("fit")
+
+    sample = data_module.train_dataset[0]
+    assert sample["source_face_mask"].count_nonzero().item() == 0
+    assert data_module.train_source_mask_root == (
+        mask_root / "train/source"
+    )

@@ -35,6 +35,7 @@ class CustomUnpairedDataParams(BaseModel):
     recursive: bool = True
     pair_by_subdirectory: bool = False
     pairing_mode: PairingMode = PairingMode.random
+    face_mask_root: Optional[str] = None
     seed: int = 42
     image_extensions: Tuple[str, ...] = (
         ".png",

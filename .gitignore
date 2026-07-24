@@ -180,6 +180,8 @@ experiments/
 !custom_unpaired.example.yaml
 !custom_unpaired_reference.example.yaml
 !custom_unpaired_reference.server.yaml
+!custom_unpaired_reference_v6_face_skin.example.yaml
+!custom_unpaired_reference_v6_face_skin.server.yaml
 
 debug.ipynb
 requirements-dev.txt

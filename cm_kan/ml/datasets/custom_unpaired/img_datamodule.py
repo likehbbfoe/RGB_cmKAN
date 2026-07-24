@@ -4,6 +4,7 @@ from typing import Tuple
 
 import lightning as L
 import torch
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torchvision.transforms.v2 import (
     CenterCrop,
@@ -75,9 +76,44 @@ class WeakAlignedTrainTransform:
             left:left + self.crop_size,
         ]
 
-    def __call__(self, source, target):
+    @staticmethod
+    def _prepare_face_mask(mask, image):
+        mask = torch.as_tensor(mask, dtype=torch.float32)
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0)
+        if mask.ndim != 3 or mask.shape[0] != 1:
+            raise ValueError(
+                "Face masks must have shape HxW or 1xHxW, "
+                f"got {tuple(mask.shape)}"
+            )
+        return F.interpolate(
+            mask.unsqueeze(0),
+            size=image.shape[-2:],
+            mode="nearest",
+        ).squeeze(0)
+
+    def __call__(
+        self,
+        source,
+        target,
+        source_face_mask=None,
+        target_face_mask=None,
+    ):
+        if (source_face_mask is None) != (target_face_mask is None):
+            raise ValueError(
+                "source_face_mask and target_face_mask must be provided together"
+            )
         source = self.prepare(source)
         target = self.prepare(target)
+        if source_face_mask is not None:
+            source_face_mask = self._prepare_face_mask(
+                source_face_mask,
+                source,
+            )
+            target_face_mask = self._prepare_face_mask(
+                target_face_mask,
+                target,
+            )
         random_values = torch.rand(4).tolist()
         vertical_position, horizontal_position = random_values[:2]
         source = self._crop(
@@ -90,13 +126,85 @@ class WeakAlignedTrainTransform:
             vertical_position,
             horizontal_position,
         )
+        if source_face_mask is not None:
+            source_face_mask = self._crop(
+                source_face_mask,
+                vertical_position,
+                horizontal_position,
+            )
+            target_face_mask = self._crop(
+                target_face_mask,
+                vertical_position,
+                horizontal_position,
+            )
 
         if random_values[2] < self.horizontal_flip_probability:
             source = source.flip(-1)
             target = target.flip(-1)
+            if source_face_mask is not None:
+                source_face_mask = source_face_mask.flip(-1)
+                target_face_mask = target_face_mask.flip(-1)
         if random_values[3] < self.vertical_flip_probability:
             source = source.flip(-2)
             target = target.flip(-2)
+            if source_face_mask is not None:
+                source_face_mask = source_face_mask.flip(-2)
+                target_face_mask = target_face_mask.flip(-2)
+        if source_face_mask is not None:
+            return (
+                source,
+                target,
+                source_face_mask,
+                target_face_mask,
+            )
+        return source, target
+
+
+class FaceAwareEvalTransform(WeakAlignedTrainTransform):
+    """Apply deterministic resize/center-crop to images and face masks."""
+
+    def __init__(self, resize_size: int, crop_size: int) -> None:
+        super().__init__(
+            resize_size=resize_size,
+            crop_size=crop_size,
+            horizontal_flip_probability=0.0,
+            vertical_flip_probability=0.0,
+        )
+
+    def __call__(
+        self,
+        source,
+        target,
+        source_face_mask=None,
+        target_face_mask=None,
+    ):
+        if (source_face_mask is None) != (target_face_mask is None):
+            raise ValueError(
+                "source_face_mask and target_face_mask must be provided together"
+            )
+        source = self.prepare(source)
+        target = self.prepare(target)
+        if source_face_mask is not None:
+            source_face_mask = self._prepare_face_mask(
+                source_face_mask,
+                source,
+            )
+            target_face_mask = self._prepare_face_mask(
+                target_face_mask,
+                target,
+            )
+
+        source = self._crop(source, 0.5, 0.5)
+        target = self._crop(target, 0.5, 0.5)
+        if source_face_mask is not None:
+            source_face_mask = self._crop(source_face_mask, 0.5, 0.5)
+            target_face_mask = self._crop(target_face_mask, 0.5, 0.5)
+            return (
+                source,
+                target,
+                source_face_mask,
+                target_face_mask,
+            )
         return source, target
 
 
@@ -171,6 +279,7 @@ class CustomUnpairedDataModule(L.LightningDataModule):
         seed: int = 42,
         image_extensions: Tuple[str, ...] = DEFAULT_IMAGE_EXTENSIONS,
         pairing_mode: str = "random",
+        face_mask_root: str | None = None,
     ) -> None:
         super().__init__()
         if resize_size < crop_size:
@@ -210,6 +319,14 @@ class CustomUnpairedDataModule(L.LightningDataModule):
             raise ValueError(
                 "Aligned pairing requires explicit val_source_dir and "
                 "val_target_dir so pairs are not split independently"
+            )
+        if (
+            face_mask_root is not None
+            and self.pairing_mode not in ALIGNED_PAIRING_MODES
+        ):
+            raise ValueError(
+                "face_mask_root requires pairing_mode='weak_aligned' or "
+                "'one_to_one' so image/mask augmentation stays synchronized"
             )
 
         if has_val_source:
@@ -270,6 +387,54 @@ class CustomUnpairedDataModule(L.LightningDataModule):
         self.val_target_root = val_target_root
         self.test_source_root = test_source_root
         self.test_target_root = test_target_root
+        self.face_mask_root = (
+            Path(face_mask_root).expanduser()
+            if face_mask_root is not None
+            else None
+        )
+
+        def domain_name(path: Path) -> str:
+            return path.parent.name if path.name == "real" else path.name
+
+        if self.face_mask_root is not None:
+            self.train_source_mask_root = (
+                self.face_mask_root
+                / "train"
+                / domain_name(self.train_source_root)
+            )
+            self.train_target_mask_root = (
+                self.face_mask_root
+                / "train"
+                / domain_name(self.train_target_root)
+            )
+            self.val_source_mask_root = (
+                self.face_mask_root
+                / "val"
+                / domain_name(self.val_source_root)
+            )
+            self.val_target_mask_root = (
+                self.face_mask_root
+                / "val"
+                / domain_name(self.val_target_root)
+            )
+            test_mask_split = "test" if has_test_source else "val"
+            self.test_source_mask_root = (
+                self.face_mask_root
+                / test_mask_split
+                / domain_name(self.test_source_root)
+            )
+            self.test_target_mask_root = (
+                self.face_mask_root
+                / test_mask_split
+                / domain_name(self.test_target_root)
+            )
+        else:
+            self.train_source_mask_root = None
+            self.train_target_mask_root = None
+            self.val_source_mask_root = None
+            self.val_target_mask_root = None
+            self.test_source_mask_root = None
+            self.test_target_mask_root = None
 
         # Color jitter is intentionally omitted: the task is to learn the
         # source/target color distributions, so color-changing augmentation
@@ -289,6 +454,10 @@ class CustomUnpairedDataModule(L.LightningDataModule):
             vertical_flip_probability=vertical_flip_probability,
         )
         self.weak_aligned_train_transform = self.aligned_train_transform
+        self.face_aware_eval_transform = FaceAwareEvalTransform(
+            resize_size=resize_size,
+            crop_size=crop_size,
+        )
         self.eval_transform = Compose([
             ToImageTensor(),
             Resize(resize_size, antialias=True),
@@ -316,6 +485,8 @@ class CustomUnpairedDataModule(L.LightningDataModule):
                     if self.pairing_mode in ALIGNED_PAIRING_MODES
                     else None
                 ),
+                source_mask_root=self.train_source_mask_root,
+                target_mask_root=self.train_target_mask_root,
             )
             self.val_dataset = UnpairedImageDataset(
                 self.val_source_paths,
@@ -326,6 +497,13 @@ class CustomUnpairedDataModule(L.LightningDataModule):
                 source_root=self.val_source_root,
                 target_root=self.val_target_root,
                 pairing_mode=self.pairing_mode,
+                paired_transform=(
+                    self.face_aware_eval_transform
+                    if self.face_mask_root is not None
+                    else None
+                ),
+                source_mask_root=self.val_source_mask_root,
+                target_mask_root=self.val_target_mask_root,
             )
         if stage in ("test", None):
             self.test_dataset = UnpairedImageDataset(
@@ -337,6 +515,13 @@ class CustomUnpairedDataModule(L.LightningDataModule):
                 source_root=self.test_source_root,
                 target_root=self.test_target_root,
                 pairing_mode=self.pairing_mode,
+                paired_transform=(
+                    self.face_aware_eval_transform
+                    if self.face_mask_root is not None
+                    else None
+                ),
+                source_mask_root=self.test_source_mask_root,
+                target_mask_root=self.test_target_mask_root,
             )
 
     def _loader(

@@ -122,6 +122,7 @@ class DataSelector:
                     recursive=params.recursive,
                     pair_by_subdirectory=params.pair_by_subdirectory,
                     pairing_mode=params.pairing_mode,
+                    face_mask_root=params.face_mask_root,
                     seed=params.seed,
                     image_extensions=params.image_extensions,
                 )

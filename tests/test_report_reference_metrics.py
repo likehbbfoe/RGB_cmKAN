@@ -4,6 +4,7 @@ from pathlib import Path
 
 from scripts.report_reference_metrics import (
     COMPACT_OUTPUT_METRICS,
+    FACE_OUTPUT_METRICS,
     RED_OUTPUT_METRICS,
     SKIN_OUTPUT_METRICS,
     format_summary,
@@ -67,6 +68,12 @@ def _write_metrics(path: Path) -> None:
         "val_fake_target_skin_valid_fraction",
         "val_source_skin_fraction",
         "val_target_skin_fraction",
+        "val_source_face_mask_fraction",
+        "val_target_face_mask_fraction",
+        "val_source_skin_face_density",
+        "val_target_skin_face_density",
+        "val_face_pair_area_ratio",
+        "val_face_pair_center_distance",
     ]
     rows = [
         {
@@ -133,6 +140,12 @@ def _write_metrics(path: Path) -> None:
             "val_fake_target_skin_valid_fraction": "0.85",
             "val_source_skin_fraction": "0.12",
             "val_target_skin_fraction": "0.11",
+            "val_source_face_mask_fraction": "0.14",
+            "val_target_face_mask_fraction": "0.13",
+            "val_source_skin_face_density": "0.62",
+            "val_target_skin_face_density": "0.58",
+            "val_face_pair_area_ratio": "1.08",
+            "val_face_pair_center_distance": "0.07",
         },
     ]
     with path.open("w", newline="", encoding="utf-8") as metrics_file:
@@ -213,6 +226,16 @@ def test_summarize_metrics_uses_latest_validation_epoch(tmp_path: Path) -> None:
         "skin_red_tail=0.003000 skin_red_bad=0.002000 "
         "skin_valid=0.850000 source_skin=0.120000 "
         "target_skin=0.110000"
+    )
+    assert format_summary(
+        epoch,
+        summary,
+        FACE_OUTPUT_METRICS,
+    ) == (
+        "epoch=136 skin_valid=0.850000 "
+        "source_face=0.140000 target_face=0.130000 "
+        "source_face_skin=0.620000 target_face_skin=0.580000 "
+        "face_area_ratio=1.080000 face_center_distance=0.070000"
     )
 
 

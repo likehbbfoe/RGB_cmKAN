@@ -1,6 +1,7 @@
 import math
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+import pytest
 import torch
 
 from cm_kan.ml.pipelines.unsupervised import UnsupervisedPipeline
@@ -260,6 +261,223 @@ def test_excessive_skin_coverage_is_rejected_as_background_contamination() -> No
     assert terms['reference_fraction'].item() > 0.5
     assert terms['valid_fraction'].item() == 0
     assert terms['loss'].item() == 0
+
+
+def test_face_roi_excludes_skin_colored_background_from_tone_statistics() -> None:
+    source = _skin_patch_image(
+        (0.90, 0.72, 0.62),
+        (0.62, 0.41, 0.28),
+        (slice(4, 12), slice(4, 12)),
+    )
+    target = _skin_patch_image(
+        (0.25, 0.16, 0.10),
+        (0.72, 0.48, 0.35),
+        (slice(12, 20), slice(12, 20)),
+    )
+    prediction = source.clone()
+    prediction[:, :, 4:12, 4:12] = torch.tensor(
+        [0.72, 0.48, 0.35],
+    ).view(1, 3, 1, 1)
+    source_face_mask = torch.zeros((1, 1, 24, 24))
+    source_face_mask[:, :, 4:12, 4:12] = 1
+    target_face_mask = torch.zeros((1, 1, 24, 24))
+    target_face_mask[:, :, 12:20, 12:20] = 1
+
+    roi_terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        prediction,
+        source,
+        target,
+        input_face_mask=source_face_mask,
+        reference_face_mask=target_face_mask,
+        max_fraction=1.0,
+    )
+    color_only_terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        prediction,
+        source,
+        target,
+        max_fraction=1.0,
+    )
+
+    assert roi_terms['valid_fraction'].item() == 1
+    assert roi_terms['input_face_fraction'].item() == pytest.approx(64 / 576)
+    assert roi_terms['reference_face_fraction'].item() == pytest.approx(
+        64 / 576
+    )
+    assert roi_terms['tone_loss'].item() < 0.01
+    assert color_only_terms['tone_loss'].item() > (
+        roi_terms['tone_loss'].item() + 0.10
+    )
+
+
+def test_black_face_roi_skips_only_the_skin_objective() -> None:
+    source = torch.tensor([0.62, 0.41, 0.28]).view(1, 3, 1, 1)
+    source = source.expand(1, 3, 16, 16)
+    target = torch.tensor([0.72, 0.48, 0.35]).view(1, 3, 1, 1)
+    target = target.expand(1, 3, 16, 16)
+    prediction = source.clone().requires_grad_(True)
+    black_roi = torch.zeros((1, 1, 16, 16))
+
+    terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        prediction,
+        source,
+        target,
+        input_face_mask=black_roi,
+        reference_face_mask=black_roi,
+    )
+    terms['loss'].backward()
+
+    assert terms['input_face_fraction'].item() == 0
+    assert terms['reference_face_fraction'].item() == 0
+    assert terms['valid_fraction'].item() == 0
+    assert terms['loss'].item() == 0
+    assert prediction.grad is not None
+    assert prediction.grad.count_nonzero().item() == 0
+
+
+def test_face_quality_gates_reject_uniform_skin_colored_false_box() -> None:
+    source = torch.full((1, 3, 24, 24), 0.5)
+    source[:, 0] = 0.90
+    source[:, 1] = 0.72
+    source[:, 2] = 0.62
+    target = source.clone()
+    face_roi = torch.zeros((1, 1, 24, 24))
+    face_roi[:, :, 6:14, 6:14] = 1
+
+    terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        source,
+        source,
+        target,
+        input_face_mask=face_roi,
+        reference_face_mask=face_roi,
+        face_min_fraction=0.01,
+        face_max_fraction=0.35,
+        skin_face_density_min=0.10,
+        skin_face_density_max=0.90,
+        face_pair_area_ratio_min=0.5,
+        face_pair_area_ratio_max=2.0,
+    )
+
+    assert terms['input_skin_face_density'].item() > 0.90
+    assert terms['reference_skin_face_density'].item() > 0.90
+    assert terms['valid_fraction'].item() == 0
+    assert terms['loss'].item() == 0
+    assert terms['input_mask'].count_nonzero().item() == 0
+
+
+def test_skin_statistics_exclude_soft_weights_below_preview_threshold() -> None:
+    inputs = torch.rand((1, 3, 4, 4))
+    reference = torch.rand((1, 3, 4, 4))
+    predictions = inputs.clone().requires_grad_(True)
+    input_soft_mask = torch.full((1, 1, 4, 4), 0.24)
+    reference_soft_mask = torch.full((1, 1, 4, 4), 0.24)
+    input_soft_mask[:, :, 0, :2] = 0.26
+    reference_soft_mask[:, :, 0, :2] = 0.26
+
+    with patch.object(
+        UnsupervisedPipeline,
+        "_soft_skin_mask",
+        side_effect=(input_soft_mask, reference_soft_mask),
+    ):
+        terms = UnsupervisedPipeline._reference_skin_tone_terms(
+            predictions,
+            inputs,
+            reference,
+            max_fraction=1.0,
+        )
+
+    assert terms['valid_fraction'].item() == 1
+    assert terms['input_fraction'].item() == pytest.approx(2 / 16)
+    assert terms['input_mask'][0, 0, 0, :2].tolist() == pytest.approx(
+        [0.26, 0.26]
+    )
+    assert terms['input_mask'][0, 0, 1:].count_nonzero().item() == 0
+    assert terms['input_mask'][0, 0, 0, 2:].count_nonzero().item() == 0
+
+
+def test_face_quality_gates_reject_mismatched_pair_area() -> None:
+    source = _skin_patch_image(
+        (0.20, 0.30, 0.70),
+        (0.62, 0.41, 0.28),
+        (slice(4, 12), slice(4, 12)),
+    )
+    target = _skin_patch_image(
+        (0.20, 0.30, 0.70),
+        (0.72, 0.48, 0.35),
+        (slice(4, 8), slice(4, 8)),
+    )
+    source_roi = torch.zeros((1, 1, 24, 24))
+    source_roi[:, :, 4:12, 4:12] = 1
+    target_roi = torch.zeros((1, 1, 24, 24))
+    target_roi[:, :, 4:8, 4:8] = 1
+
+    terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        source,
+        source,
+        target,
+        input_face_mask=source_roi,
+        reference_face_mask=target_roi,
+        skin_face_density_max=1.0,
+        face_pair_area_ratio_min=0.5,
+        face_pair_area_ratio_max=2.0,
+    )
+
+    assert terms['face_pair_area_ratio'].item() == pytest.approx(4.0)
+    assert terms['valid_fraction'].item() == 0
+
+
+def test_face_quality_gates_reject_distant_pair_centers() -> None:
+    source = _skin_patch_image(
+        (0.20, 0.30, 0.70),
+        (0.62, 0.41, 0.28),
+        (slice(2, 10), slice(2, 10)),
+    )
+    target = _skin_patch_image(
+        (0.20, 0.30, 0.70),
+        (0.72, 0.48, 0.35),
+        (slice(14, 22), slice(14, 22)),
+    )
+    source_roi = torch.zeros((1, 1, 24, 24))
+    source_roi[:, :, 2:10, 2:10] = 1
+    target_roi = torch.zeros((1, 1, 24, 24))
+    target_roi[:, :, 14:22, 14:22] = 1
+
+    baseline_terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        source,
+        source,
+        target,
+        input_face_mask=source_roi,
+        reference_face_mask=target_roi,
+        skin_face_density_max=1.0,
+        face_pair_center_distance_max=1.0,
+    )
+    terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        source,
+        source,
+        target,
+        input_face_mask=source_roi,
+        reference_face_mask=target_roi,
+        skin_face_density_max=1.0,
+        face_pair_center_distance_max=0.30,
+    )
+
+    assert baseline_terms['valid_fraction'].item() == 1
+    assert terms['face_pair_center_distance'].item() > 0.30
+    assert terms['valid_fraction'].item() == 0
+    assert terms['input_mask'].count_nonzero().item() == 0
+
+
+def test_required_face_masks_fail_instead_of_using_color_only_fallback() -> None:
+    pipeline = UnsupervisedPipeline.__new__(UnsupervisedPipeline)
+    torch.nn.Module.__init__(pipeline)
+    pipeline.reference_skin_require_face_mask = True
+    pipeline.reference_skin_tone_weight = 2.0
+    image = torch.rand((1, 3, 16, 16))
+
+    with pytest.raises(ValueError, match="requires face masks"):
+        pipeline._face_masks_from_batch({
+            "source": image,
+            "target": image,
+        })
 
 
 def test_invalid_skin_samples_do_not_dilute_valid_batch() -> None:

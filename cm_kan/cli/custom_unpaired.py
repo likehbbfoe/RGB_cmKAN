@@ -40,3 +40,18 @@ def override_data_root(
             }
         else:
             data_config.pop(split, None)
+
+
+def override_face_mask_root(
+    config: dict[str, Any],
+    face_mask_root: str,
+) -> None:
+    """Apply a mirrored face-mask sidecar root to a raw configuration."""
+    if config.get("data", {}).get("type") != "custom_unpaired":
+        raise ValueError(
+            "--face-mask-root can only be used with "
+            "data.type=custom_unpaired"
+        )
+    config["data"].setdefault("params", {})["face_mask_root"] = (
+        face_mask_root
+    )

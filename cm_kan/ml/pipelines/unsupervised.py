@@ -43,6 +43,7 @@ class UnsupervisedPipeline(L.LightningModule):
         reference_white_balance_ramp_epochs: int = 0,
         reference_skin_tone_weight: float = 0.0,
         reference_skin_tone_ramp_epochs: int = 0,
+        reference_skin_require_face_mask: bool = False,
         reference_skin_std_weight: float = 0.25,
         reference_skin_luminance_weight: float = 0.15,
         reference_skin_uniformity_weight: float = 0.25,
@@ -51,6 +52,13 @@ class UnsupervisedPipeline(L.LightningModule):
         reference_skin_red_overshoot_margin: float = 0.03,
         reference_skin_min_fraction: float = 0.005,
         reference_skin_max_fraction: float = 0.5,
+        reference_face_min_fraction: float = 0.0,
+        reference_face_max_fraction: float = 1.0,
+        reference_skin_face_density_min: float = 0.0,
+        reference_skin_face_density_max: float = 1.0,
+        reference_face_pair_area_ratio_min: float = 0.0,
+        reference_face_pair_area_ratio_max: float = 1e6,
+        reference_face_pair_center_distance_max: float = 2.0,
         reference_local_chroma_weight: float = 0.0,
         reference_local_chroma_tail_weight: float = 0.0,
         reference_local_chroma_tail_fraction: float = 0.05,
@@ -92,6 +100,9 @@ class UnsupervisedPipeline(L.LightningModule):
         self.reference_skin_tone_ramp_epochs = (
             reference_skin_tone_ramp_epochs
         )
+        self.reference_skin_require_face_mask = (
+            reference_skin_require_face_mask
+        )
         self.reference_skin_std_weight = reference_skin_std_weight
         self.reference_skin_luminance_weight = (
             reference_skin_luminance_weight
@@ -110,6 +121,23 @@ class UnsupervisedPipeline(L.LightningModule):
         )
         self.reference_skin_min_fraction = reference_skin_min_fraction
         self.reference_skin_max_fraction = reference_skin_max_fraction
+        self.reference_face_min_fraction = reference_face_min_fraction
+        self.reference_face_max_fraction = reference_face_max_fraction
+        self.reference_skin_face_density_min = (
+            reference_skin_face_density_min
+        )
+        self.reference_skin_face_density_max = (
+            reference_skin_face_density_max
+        )
+        self.reference_face_pair_area_ratio_min = (
+            reference_face_pair_area_ratio_min
+        )
+        self.reference_face_pair_area_ratio_max = (
+            reference_face_pair_area_ratio_max
+        )
+        self.reference_face_pair_center_distance_max = (
+            reference_face_pair_center_distance_max
+        )
         self.reference_local_chroma_weight = reference_local_chroma_weight
         self.reference_local_chroma_tail_weight = (
             reference_local_chroma_tail_weight
@@ -396,6 +424,38 @@ class UnsupervisedPipeline(L.LightningModule):
         mask = raw_mask * torch.sigmoid((raw_mask - 0.35) / 0.05)
         return mask.detach()
 
+    @staticmethod
+    def _prepare_face_roi(face_mask, images, name):
+        """Validate a transformed face ROI or return an all-image fallback."""
+        if face_mask is None:
+            return images.new_ones(
+                (
+                    images.shape[0],
+                    1,
+                    images.shape[2],
+                    images.shape[3],
+                )
+            )
+        if face_mask.ndim == 3:
+            face_mask = face_mask.unsqueeze(1)
+        expected_shape = (
+            images.shape[0],
+            1,
+            images.shape[2],
+            images.shape[3],
+        )
+        if tuple(face_mask.shape) != expected_shape:
+            raise ValueError(
+                f"{name} must have shape {expected_shape}, "
+                f"got {tuple(face_mask.shape)}"
+            )
+        return (
+            face_mask
+            .to(device=images.device, dtype=images.dtype)
+            .detach()
+            .clamp(0, 1)
+        )
+
     @classmethod
     def _weighted_skin_statistics(cls, images, mask, eps=1e-3):
         """Compute per-image linear-RGB skin chroma and luminance moments."""
@@ -450,8 +510,17 @@ class UnsupervisedPipeline(L.LightningModule):
         predictions,
         inputs,
         reference,
+        input_face_mask=None,
+        reference_face_mask=None,
         min_fraction=0.005,
         max_fraction=0.5,
+        face_min_fraction=0.0,
+        face_max_fraction=1.0,
+        skin_face_density_min=0.0,
+        skin_face_density_max=1.0,
+        face_pair_area_ratio_min=0.0,
+        face_pair_area_ratio_max=1e6,
+        face_pair_center_distance_max=2.0,
         std_weight=0.25,
         luminance_weight=0.15,
         uniformity_weight=0.25,
@@ -467,20 +536,137 @@ class UnsupervisedPipeline(L.LightningModule):
                 "skin fractions must satisfy 0 < min_fraction <= "
                 "max_fraction <= 1"
             )
-        input_mask = cls._soft_skin_mask(inputs)
-        reference_mask = cls._soft_skin_mask(reference)
+        if not 0 <= face_min_fraction <= face_max_fraction <= 1:
+            raise ValueError(
+                "face fractions must satisfy 0 <= face_min_fraction <= "
+                "face_max_fraction <= 1"
+            )
+        if not (
+            0
+            <= skin_face_density_min
+            <= skin_face_density_max
+            <= 1
+        ):
+            raise ValueError(
+                "skin/face density bounds must satisfy 0 <= min <= max <= 1"
+            )
+        if not (
+            0
+            <= face_pair_area_ratio_min
+            <= face_pair_area_ratio_max
+        ):
+            raise ValueError(
+                "face area-ratio bounds must satisfy 0 <= min <= max"
+            )
+        if face_pair_center_distance_max < 0:
+            raise ValueError(
+                "face_pair_center_distance_max must be non-negative"
+            )
+        if (input_face_mask is None) != (reference_face_mask is None):
+            raise ValueError(
+                "input_face_mask and reference_face_mask must be provided together"
+            )
+        input_face_roi = cls._prepare_face_roi(
+            input_face_mask,
+            inputs,
+            "input_face_mask",
+        )
+        reference_face_roi = cls._prepare_face_roi(
+            reference_face_mask,
+            reference,
+            "reference_face_mask",
+        )
+        input_soft_mask = cls._soft_skin_mask(inputs)
+        reference_soft_mask = cls._soft_skin_mask(reference)
+        # The preview, validity checks, and training statistics must share the
+        # same support. Near-threshold beige pixels shown as black must not
+        # retain a small weight and collectively dominate a face statistic.
+        input_support = (input_soft_mask > 0.25).detach()
+        reference_support = (reference_soft_mask > 0.25).detach()
+        input_mask = input_soft_mask * input_support * input_face_roi
+        reference_mask = (
+            reference_soft_mask
+            * reference_support
+            * reference_face_roi
+        )
         reduce_dims = (1, 2, 3)
+        input_face_fraction = (
+            (input_face_roi > 0.5).float().mean(dim=reduce_dims)
+        ).detach()
+        reference_face_fraction = (
+            (reference_face_roi > 0.5).float().mean(dim=reduce_dims)
+        ).detach()
         input_fraction = (
             (input_mask > 0.25).float().mean(dim=reduce_dims)
         ).detach()
         reference_fraction = (
             (reference_mask > 0.25).float().mean(dim=reduce_dims)
         ).detach()
+        input_skin_face_density = (
+            input_fraction / input_face_fraction.clamp_min(1e-6)
+        ).detach()
+        reference_skin_face_density = (
+            reference_fraction / reference_face_fraction.clamp_min(1e-6)
+        ).detach()
+        face_pair_area_ratio = (
+            input_face_fraction
+            / reference_face_fraction.clamp_min(1e-6)
+        ).detach()
+
+        def face_centroid(mask):
+            height, width = mask.shape[-2:]
+            y_coordinates = torch.linspace(
+                0,
+                1,
+                steps=height,
+                device=mask.device,
+                dtype=mask.dtype,
+            ).view(1, 1, height, 1)
+            x_coordinates = torch.linspace(
+                0,
+                1,
+                steps=width,
+                device=mask.device,
+                dtype=mask.dtype,
+            ).view(1, 1, 1, width)
+            weights = mask.detach()
+            weight_sum = weights.sum(
+                dim=reduce_dims,
+            ).clamp_min(1e-6)
+            center_x = (
+                (weights * x_coordinates).sum(dim=reduce_dims)
+                / weight_sum
+            )
+            center_y = (
+                (weights * y_coordinates).sum(dim=reduce_dims)
+                / weight_sum
+            )
+            return torch.stack((center_x, center_y), dim=1)
+
+        face_pair_center_distance = torch.linalg.vector_norm(
+            face_centroid(input_face_roi)
+            - face_centroid(reference_face_roi),
+            dim=1,
+        ).detach()
         valid = (
             (input_fraction >= min_fraction)
             & (reference_fraction >= min_fraction)
             & (input_fraction <= max_fraction)
             & (reference_fraction <= max_fraction)
+            & (input_face_fraction >= face_min_fraction)
+            & (reference_face_fraction >= face_min_fraction)
+            & (input_face_fraction <= face_max_fraction)
+            & (reference_face_fraction <= face_max_fraction)
+            & (input_skin_face_density >= skin_face_density_min)
+            & (reference_skin_face_density >= skin_face_density_min)
+            & (input_skin_face_density <= skin_face_density_max)
+            & (reference_skin_face_density <= skin_face_density_max)
+            & (face_pair_area_ratio >= face_pair_area_ratio_min)
+            & (face_pair_area_ratio <= face_pair_area_ratio_max)
+            & (
+                face_pair_center_distance
+                <= face_pair_center_distance_max
+            )
         ).detach()
         valid_weight = valid.float()
         valid_denominator = valid_weight.sum().clamp_min(1.0)
@@ -622,8 +808,23 @@ class UnsupervisedPipeline(L.LightningModule):
             'luminance_ratio': valid_mean(luminance_ratio),
             'input_fraction': input_fraction.mean(),
             'reference_fraction': reference_fraction.mean(),
+            'input_face_fraction': input_face_fraction.mean(),
+            'reference_face_fraction': reference_face_fraction.mean(),
+            'input_skin_face_density': input_skin_face_density.mean(),
+            'reference_skin_face_density': (
+                reference_skin_face_density.mean()
+            ),
+            'face_pair_area_ratio': face_pair_area_ratio.mean(),
+            'face_pair_center_distance': (
+                face_pair_center_distance.mean()
+            ),
             'valid_fraction': valid_weight.mean(),
-            'input_mask': input_mask,
+            # Invalid/abstained ROIs must remain protected by the general
+            # local-chroma guard instead of being excluded as trusted skin.
+            'input_mask': (
+                input_mask
+                * valid_weight.view(-1, 1, 1, 1)
+            ),
         }
 
     def _configured_reference_skin_tone_terms(
@@ -631,13 +832,30 @@ class UnsupervisedPipeline(L.LightningModule):
         predictions,
         inputs,
         reference,
+        input_face_mask=None,
+        reference_face_mask=None,
     ):
         return self._reference_skin_tone_terms(
             predictions,
             inputs,
             reference,
+            input_face_mask=input_face_mask,
+            reference_face_mask=reference_face_mask,
             min_fraction=self.reference_skin_min_fraction,
             max_fraction=self.reference_skin_max_fraction,
+            face_min_fraction=self.reference_face_min_fraction,
+            face_max_fraction=self.reference_face_max_fraction,
+            skin_face_density_min=self.reference_skin_face_density_min,
+            skin_face_density_max=self.reference_skin_face_density_max,
+            face_pair_area_ratio_min=(
+                self.reference_face_pair_area_ratio_min
+            ),
+            face_pair_area_ratio_max=(
+                self.reference_face_pair_area_ratio_max
+            ),
+            face_pair_center_distance_max=(
+                self.reference_face_pair_center_distance_max
+            ),
             std_weight=self.reference_skin_std_weight,
             luminance_weight=self.reference_skin_luminance_weight,
             uniformity_weight=self.reference_skin_uniformity_weight,
@@ -676,6 +894,12 @@ class UnsupervisedPipeline(L.LightningModule):
                 'luminance_ratio',
                 'input_fraction',
                 'reference_fraction',
+                'input_face_fraction',
+                'reference_face_fraction',
+                'input_skin_face_density',
+                'reference_skin_face_density',
+                'face_pair_area_ratio',
+                'face_pair_center_distance',
                 'valid_fraction',
             )
         }
@@ -1217,6 +1441,8 @@ class UnsupervisedPipeline(L.LightningModule):
         imgA,
         imgB,
         adversarial_weight=None,
+        source_face_mask=None,
+        target_face_mask=None,
     ):
         """cycle images - using only generator nets"""
         effectiveAdversarialWeight = (
@@ -1328,11 +1554,15 @@ class UnsupervisedPipeline(L.LightningModule):
                 fakeA,
                 imgB,
                 imgA,
+                input_face_mask=target_face_mask,
+                reference_face_mask=source_face_mask,
             )
             skinTermsB = self._configured_reference_skin_tone_terms(
                 fakeB,
                 imgA,
                 imgB,
+                input_face_mask=source_face_mask,
+                reference_face_mask=target_face_mask,
             )
         else:
             skinTermsA = self._zero_reference_skin_tone_terms(fakeA)
@@ -1645,12 +1875,24 @@ class UnsupervisedPipeline(L.LightningModule):
         
         return gen_loss
 
-    def generator_warmup_step(self, imgA, imgB):
+    def generator_warmup_step(
+        self,
+        imgA,
+        imgB,
+        source_face_mask=None,
+        target_face_mask=None,
+    ):
         """Learn the non-adversarial translation objective before GAN updates."""
+        training_kwargs = {'adversarial_weight': 0.0}
+        if source_face_mask is not None or target_face_mask is not None:
+            training_kwargs.update({
+                'source_face_mask': source_face_mask,
+                'target_face_mask': target_face_mask,
+            })
         warmup_loss = self.generator_training_step(
             imgA,
             imgB,
-            adversarial_weight=0.0,
+            **training_kwargs,
         )
         self._log_loss(
             'warmup_loss', warmup_loss, imgA.shape[0], prog_bar=True
@@ -1711,8 +1953,33 @@ class UnsupervisedPipeline(L.LightningModule):
             "batch, or the legacy four-item recolor batch"
         )
 
+    def _face_masks_from_batch(self, batch):
+        source_face_mask = None
+        target_face_mask = None
+        if isinstance(batch, Mapping):
+            source_face_mask = batch.get('source_face_mask')
+            target_face_mask = batch.get('target_face_mask')
+        if (source_face_mask is None) != (target_face_mask is None):
+            raise ValueError(
+                "source_face_mask and target_face_mask must be present together"
+            )
+        if (
+            self.reference_skin_require_face_mask
+            and self.reference_skin_tone_weight > 0
+            and source_face_mask is None
+        ):
+            raise ValueError(
+                "This skin-tone configuration requires face masks, but the "
+                "batch has none. Generate the sidecars and configure "
+                "data.params.face_mask_root."
+            )
+        return source_face_mask, target_face_mask
+
     def _unpaired_evaluation_step(self, batch, stage: str):
         source, target = self._unpack_adversarial_batch(batch)
+        source_face_mask, target_face_mask = self._face_masks_from_batch(
+            batch
+        )
         target_condition = self._style_condition(source, target)
         source_condition = self._style_condition(target, source)
         if self.patch_nce_weight > 0:
@@ -1815,6 +2082,8 @@ class UnsupervisedPipeline(L.LightningModule):
                     fake_source,
                     target,
                     source,
+                    input_face_mask=target_face_mask,
+                    reference_face_mask=source_face_mask,
                 )
             )
             fake_target_skin_terms = (
@@ -1822,6 +2091,8 @@ class UnsupervisedPipeline(L.LightningModule):
                     fake_target,
                     source,
                     target,
+                    input_face_mask=source_face_mask,
+                    reference_face_mask=target_face_mask,
                 )
             )
         else:
@@ -1997,6 +2268,8 @@ class UnsupervisedPipeline(L.LightningModule):
                         source,
                         source,
                         target,
+                        input_face_mask=source_face_mask,
+                        reference_face_mask=target_face_mask,
                     )
                 )
             else:
@@ -2231,6 +2504,28 @@ class UnsupervisedPipeline(L.LightningModule):
                 'target_skin_fraction': (
                     fake_target_skin_terms['reference_fraction']
                 ),
+                'source_face_mask_fraction': (
+                    fake_target_skin_terms['input_face_fraction']
+                ),
+                'target_face_mask_fraction': (
+                    fake_target_skin_terms['reference_face_fraction']
+                ),
+                'source_skin_face_density': (
+                    fake_target_skin_terms['input_skin_face_density']
+                ),
+                'target_skin_face_density': (
+                    fake_target_skin_terms[
+                        'reference_skin_face_density'
+                    ]
+                ),
+                'face_pair_area_ratio': (
+                    fake_target_skin_terms['face_pair_area_ratio']
+                ),
+                'face_pair_center_distance': (
+                    fake_target_skin_terms[
+                        'face_pair_center_distance'
+                    ]
+                ),
                 'fake_target_skin_valid_fraction': (
                     fake_target_skin_terms['valid_fraction']
                 ),
@@ -2415,6 +2710,9 @@ class UnsupervisedPipeline(L.LightningModule):
             return {'loss': loss}
         else:
             img_a, img_b = self._unpack_adversarial_batch(batch)
+            source_face_mask, target_face_mask = self._face_masks_from_batch(
+                batch
+            )
             opt_gen, opt_disc = self.optimizers()
             sch_gen, sch_disc = self.lr_schedulers()
 
@@ -2424,7 +2722,12 @@ class UnsupervisedPipeline(L.LightningModule):
                     [self.model.dis_a, self.model.dis_b], requires_grad=False
                 )
                 opt_gen.zero_grad()
-                warmup_loss = self.generator_warmup_step(img_a, img_b)
+                warmup_loss = self.generator_warmup_step(
+                    img_a,
+                    img_b,
+                    source_face_mask=source_face_mask,
+                    target_face_mask=target_face_mask,
+                )
                 self.manual_backward(warmup_loss)
                 self._clip_optimizer_gradients(opt_gen)
                 opt_gen.step()
@@ -2437,7 +2740,12 @@ class UnsupervisedPipeline(L.LightningModule):
             self.toggle_optimizer(opt_gen)
             self._set_requires_grad([self.model.dis_a, self.model.dis_b], requires_grad=False)
             opt_gen.zero_grad()
-            gen_loss = self.generator_training_step(img_a, img_b)
+            gen_loss = self.generator_training_step(
+                img_a,
+                img_b,
+                source_face_mask=source_face_mask,
+                target_face_mask=target_face_mask,
+            )
             self.manual_backward(gen_loss)
             self._clip_optimizer_gradients(opt_gen)
             opt_gen.step()

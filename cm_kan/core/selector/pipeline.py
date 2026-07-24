@@ -58,6 +58,9 @@ class PipelineSelector:
                     reference_skin_tone_ramp_epochs=(
                         config.pipeline.params.reference_skin_tone_ramp_epochs
                     ),
+                    reference_skin_require_face_mask=(
+                        config.pipeline.params.reference_skin_require_face_mask
+                    ),
                     reference_skin_std_weight=(
                         config.pipeline.params.reference_skin_std_weight
                     ),
@@ -81,6 +84,27 @@ class PipelineSelector:
                     ),
                     reference_skin_max_fraction=(
                         config.pipeline.params.reference_skin_max_fraction
+                    ),
+                    reference_face_min_fraction=(
+                        config.pipeline.params.reference_face_min_fraction
+                    ),
+                    reference_face_max_fraction=(
+                        config.pipeline.params.reference_face_max_fraction
+                    ),
+                    reference_skin_face_density_min=(
+                        config.pipeline.params.reference_skin_face_density_min
+                    ),
+                    reference_skin_face_density_max=(
+                        config.pipeline.params.reference_skin_face_density_max
+                    ),
+                    reference_face_pair_area_ratio_min=(
+                        config.pipeline.params.reference_face_pair_area_ratio_min
+                    ),
+                    reference_face_pair_area_ratio_max=(
+                        config.pipeline.params.reference_face_pair_area_ratio_max
+                    ),
+                    reference_face_pair_center_distance_max=(
+                        config.pipeline.params.reference_face_pair_center_distance_max
                     ),
                     reference_local_chroma_weight=(
                         config.pipeline.params.reference_local_chroma_weight

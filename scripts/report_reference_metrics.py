@@ -14,7 +14,8 @@ from typing import Iterable, Mapping
 DEFAULT_METRICS_PATH = Path(
     os.environ.get(
         "CMKAN_METRICS_PATH",
-        "experiments/custom_one_to_one_reference_color_v5_skin/logs/metrics.csv",
+        "experiments/custom_one_to_one_reference_color_v6_face_skin/"
+        "logs/metrics.csv",
     )
 )
 
@@ -67,6 +68,16 @@ SKIN_OUTPUT_METRICS = (
     ("skin_valid", "val_fake_target_skin_valid_fraction"),
     ("source_skin", "val_source_skin_fraction"),
     ("target_skin", "val_target_skin_fraction"),
+)
+
+FACE_OUTPUT_METRICS = (
+    ("skin_valid", "val_fake_target_skin_valid_fraction"),
+    ("source_face", "val_source_face_mask_fraction"),
+    ("target_face", "val_target_face_mask_fraction"),
+    ("source_face_skin", "val_source_skin_face_density"),
+    ("target_face_skin", "val_target_skin_face_density"),
+    ("face_area_ratio", "val_face_pair_area_ratio"),
+    ("face_center_distance", "val_face_pair_center_distance"),
 )
 
 LEGACY_OUTPUT_METRICS = (
@@ -138,6 +149,12 @@ SKIN_SAFETY_OUTPUT_METRICS = (
     ("skin_valid", "val_fake_target_skin_valid_fraction"),
     ("source_skin", "val_source_skin_fraction"),
     ("target_skin", "val_target_skin_fraction"),
+    ("source_face", "val_source_face_mask_fraction"),
+    ("target_face", "val_target_face_mask_fraction"),
+    ("source_face_skin", "val_source_skin_face_density"),
+    ("target_face_skin", "val_target_skin_face_density"),
+    ("face_area_ratio", "val_face_pair_area_ratio"),
+    ("face_center_distance", "val_face_pair_center_distance"),
 )
 
 ALL_OUTPUT_METRICS = (
@@ -201,6 +218,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Print the target-relative skin-tone and local-red diagnostics"
+        ),
+    )
+    output_group.add_argument(
+        "--face",
+        action="store_true",
+        help=(
+            "Print only face-ROI validity diagnostics for the v6 objective"
         ),
     )
     return parser.parse_args()
@@ -318,6 +342,8 @@ def main() -> None:
         output_metrics = RED_OUTPUT_METRICS
     elif args.skin:
         output_metrics = SKIN_OUTPUT_METRICS
+    elif args.face:
+        output_metrics = FACE_OUTPUT_METRICS
     else:
         output_metrics = COMPACT_OUTPUT_METRICS
     print(format_summary(epoch, summary, output_metrics))
