@@ -202,17 +202,17 @@ color-only heuristic. A present but completely black mask means no reliable
 face was detected; that sample still trains with the other objectives, but
 contributes nothing to the skin loss.
 
-After checking the preview, start a fresh v6 experiment:
+After checking the preview, start a fresh v7 experiment:
 
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=7 \
-./scripts/train_custom_unpaired_reference_v6_face_skin.sh
+./scripts/train_custom_unpaired_reference_v7_face_skin.sh
 ```
 
 The launcher stops early with an installation hint if it detects the known
 Lightning 2.1.x and Rich 14+ progress-bar incompatibility. The server config
 starts a separate experiment named
-`custom_one_to_one_reference_color_v6_face_skin`, so all v1–v5 checkpoints and
+`custom_one_to_one_reference_color_v7_face_skin`, so all v1–v6 checkpoints and
 CSV logs are left untouched.
 
 v4 scales the reference style delta by 10 and adds a zero-initialized direct path
@@ -224,16 +224,18 @@ It still compares color statistics rather than facial pixels, so it does not
 copy the target person's features or texture. Conservative validity gates also
 skip ROIs that are too small/large, nearly uniform skin color, or more than 2×
 different in source/target area, as well as pairs whose face centers are far
-apart.
+apart. v7 keeps the v6 model and safety losses unchanged, but changes the upper
+face-skin-density gate from `0.90` to `1.0`. The old ceiling rejected most
+otherwise valid, tightly cropped face ROIs in the measured dataset.
 
-The v6 stability configuration trains for 200 epochs. It uses five epochs of
+The v7 stability configuration trains for 200 epochs. It uses five epochs of
 the complete non-adversarial generator objective, then ramps the adversarial
 weight from `0.1` at epoch 5 to `1.0` at epoch 14. Keep `resume: false`; do not
-resume a v5 or older checkpoint. Geometric augmentation applies the same resize,
+resume a v6 or older checkpoint. Geometric augmentation applies the same resize,
 crop, and flip to each image and its sidecar mask.
 
 Before training updates, the callback saves
-`../experiment/custom_one_to_one_reference_color_v6_face_skin/logs/figures/initial_source_to_target_0.png`;
+`../experiment/custom_one_to_one_reference_color_v7_face_skin/logs/figures/initial_source_to_target_0.png`;
 it should look like the source because the bounded residual head starts from
 identity. Reference-guided best checkpoints monitor
 `val_reference_selection_loss`. Run
@@ -241,13 +243,13 @@ identity. Reference-guided best checkpoints monitor
 epochs 1–5, `response` and `direct` should leave zero and `skin_valid` must be
 non-zero. A black face mask only lowers the number of valid skin samples; it
 does not disable adversarial, cycle, identity, exposure, reflectance, or PatchNCE
-training. The v1–v5 configs remain available for exact rollback.
+training. The v1–v6 configs remain available for exact rollback.
 
 Use one target image as the reference for one source image or a source folder:
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v6_face_skin.server.yaml \
+  --config configs/custom_unpaired_reference_v7_face_skin.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /absolute/path/to/source_images \
   --reference /absolute/path/to/target_reference.jpg \
@@ -262,7 +264,7 @@ The reference contributes global color and exposure statistics; it does not
 copy the reference scene or subject. See the
 [Chinese custom unpaired guide](docs/custom_unpaired_training_zh.md#-参考图引导模式当前数据推荐)
 for the complete mask checks and training procedure. Prediction must use the
-same v6 YAML as training.
+same v7 YAML as training.
 
 
 

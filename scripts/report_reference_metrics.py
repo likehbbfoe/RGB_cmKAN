@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FALLBACK_METRICS_PATH = (
     PROJECT_ROOT.parent
     / "experiment"
-    / "custom_one_to_one_reference_color_v6_face_skin"
+    / "custom_one_to_one_reference_color_v7_face_skin"
     / "logs"
     / "metrics.csv"
 )
@@ -231,7 +231,7 @@ def parse_args() -> argparse.Namespace:
         "--face",
         action="store_true",
         help=(
-            "Print only face-ROI validity diagnostics for the v6 objective"
+            "Print only face-ROI validity diagnostics"
         ),
     )
     return parser.parse_args()

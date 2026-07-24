@@ -973,13 +973,84 @@ scripts/report_reference_metrics.py
 如果服务器路径不是默认值，修改 YAML 中的
 `data.params.face_mask_root`，或者把 mask root 作为训练脚本第 5 个参数传入。
 
+### v7：取消不适合紧人脸 ROI 的肤色密度上限
+
+v6 实测 `skin_valid=0.03`，但有效样本的 `skin_ratio=0.32`。这说明肤色目标本身
+有效，问题是绝大多数样本没有通过 gate。离线统计进一步确认主要失败项是
+`skin/face density > 0.90`：
+
+```text
+train/source: density_outside=198/255
+train/target: density_outside=201/255
+val/source:   density_outside=25/29
+val/target:   density_outside=23/29
+```
+
+人脸检测框内大部分像素属于肤色，在当前紧椭圆 ROI 中是正常情况，不应作为弃权
+理由。v7 因此只修改一个训练门限：
+
+```yaml
+reference_skin_face_density_min: 0.10
+reference_skin_face_density_max: 1.00
+```
+
+下限、人脸面积、source/target 面积比、中心距离和全部局部红斑保护保持不变。v7
+不会把 style 权重重新提高到 `15`，也不会放行全黑 mask；它只是让真实高密度脸部
+参与已经验证有效的肤色目标。
+
+现有 `/home/share/y50063074/data_face_masks` 可以直接复用，不需要重新检测。默认
+离线 QC 也已改为 v7 的 `1.00`；若需要按旧 v6 上限复查，可显式运行：
+
+```bash
+python scripts/generate_face_masks.py \
+  --preview-samples 0 \
+  --qc-skin-face-density-max 0.90
+```
+
+v7 使用独立实验目录并必须从零训练：
+
+```text
+configs/custom_unpaired_reference_v7_face_skin.server.yaml
+scripts/train_custom_unpaired_reference_v7_face_skin.sh
+../experiment/custom_one_to_one_reference_color_v7_face_skin/
+```
+
+启动：
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=7 \
+./scripts/train_custom_unpaired_reference_v7_face_skin.sh
+```
+
+不要把 v6 的第 78 轮 checkpoint 续接进来。完成第一次验证后，无参数报告脚本默认
+读取 v7：
+
+```bash
+python scripts/report_reference_metrics.py --face
+python scripts/report_reference_metrics.py --skin
+```
+
+先确认 `skin_valid` 相比 v6 的 `0.03` 显著提高，再观察 `skin_ratio`、局部红色指标
+和固定预览。此改动直接解决肤色监督覆盖率，不保证整幅背景风格立即变化；整图
+`ratio` 仍需单独观察。
+
+服务器不能直接拉取时，只需新增或替换：
+
+```text
+configs/custom_unpaired_reference_v7_face_skin.server.yaml
+scripts/train_custom_unpaired_reference_v7_face_skin.sh
+scripts/generate_face_masks.py
+scripts/report_reference_metrics.py
+```
+
 ### 用一张参考图推理
 
 下面会把同一张参考图广播给输入目录中的所有 source 图片：
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v6_face_skin.server.yaml \
+  --config configs/custom_unpaired_reference_v7_face_skin.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /absolute/path/to/source_images \
   --reference /absolute/path/to/target_reference.jpg \
@@ -990,8 +1061,8 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
 省略 `--output` 时，图片默认写入
 `../experiment/<experiment>/predictions/`。
 
-推理必须使用训练这个 checkpoint 时的同一份 YAML。v6 checkpoint 应搭配 v6
-YAML，v5/v4 checkpoint 仍分别搭配 v5/v4 YAML。face mask 只约束训练期的 skin
+推理必须使用训练这个 checkpoint 时的同一份 YAML。v7 checkpoint 应搭配 v7
+YAML，v6/v5/v4 checkpoint 仍分别搭配各自 YAML。face mask 只约束训练期的 skin
 loss，普通推理不需要为输入图片再生成 mask。`reference_direct_conditioning`、
 `output_mode` 与 `max_logit_shift` 都是配置行为；配置不一致会改变模型结构、输出
 范围或颜色变化幅度。
@@ -1006,12 +1077,12 @@ loss，普通推理不需要为输入图片再生成 mask。`reference_direct_co
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 \
-CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v6_face_skin.server.yaml \
+CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v7_face_skin.server.yaml \
 ./scripts/predict_reference_guided.sh /absolute/path/to/target_reference.jpg
 ```
 
 该推理封装脚本为了兼容旧 checkpoint，默认仍指向 v2 配置；使用 v3 checkpoint 时
-必须显式传 v3 YAML，使用 v4/v5/v6 checkpoint 时也必须显式传对应 YAML；也可以
+必须显式传 v3 YAML，使用 v4/v5/v6/v7 checkpoint 时也必须显式传对应 YAML；也可以
 直接使用前面的完整 `main.py predict` 命令。
 
 ### 同一 source 更换参考图的对照检验
@@ -1021,7 +1092,7 @@ CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v6_face_skin.server.yaml \
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v6_face_skin.server.yaml \
+  --config configs/custom_unpaired_reference_v7_face_skin.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/warm_target.jpg \
@@ -1029,7 +1100,7 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --batch_size 1
 
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v6_face_skin.server.yaml \
+  --config configs/custom_unpaired_reference_v7_face_skin.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/cool_target.jpg \
@@ -1291,7 +1362,7 @@ python scripts/report_reference_metrics.py
 
 脚本只读取 `metrics.csv`，不读取图片、文件名或数据路径，并输出一行可以直接
 复制的汇总结果。默认路径是
-`../experiment/custom_one_to_one_reference_color_v6_face_skin/logs/metrics.csv`；如果
+`../experiment/custom_one_to_one_reference_color_v7_face_skin/logs/metrics.csv`；如果
 实验目录不同，可以把实际 CSV 路径作为第一个参数：
 
 ```bash

@@ -27,15 +27,16 @@ IMAGE_SUFFIXES = {
 FaceBox = tuple[int, int, int, int]
 FaceDetector = Callable[[np.ndarray], Sequence[Sequence[int]]]
 
-# These thresholds mirror the v6 face-skin server/example configs.  The
-# generator reports pre-transform quality estimates with them; training still
-# performs the authoritative check after resize/crop augmentation.
-V6_QC_SKIN_MIN_FRACTION = 0.005
-V6_QC_SKIN_MAX_FRACTION = 0.50
-V6_QC_FACE_MIN_FRACTION = 0.01
-V6_QC_FACE_MAX_FRACTION = 0.35
-V6_QC_SKIN_FACE_DENSITY_MIN = 0.10
-V6_QC_SKIN_FACE_DENSITY_MAX = 0.90
+# These defaults mirror the latest v7 face-skin config.  The generator reports
+# pre-transform quality estimates with them; training still performs the
+# authoritative check after resize/crop augmentation.  The density maximum is
+# configurable so historical v6 masks can still be checked with 0.90.
+QC_SKIN_MIN_FRACTION = 0.005
+QC_SKIN_MAX_FRACTION = 0.50
+QC_FACE_MIN_FRACTION = 0.01
+QC_FACE_MAX_FRACTION = 0.35
+QC_SKIN_FACE_DENSITY_MIN = 0.10
+DEFAULT_QC_SKIN_FACE_DENSITY_MAX = 1.00
 
 
 @dataclass(frozen=True)
@@ -518,29 +519,48 @@ def _percentile_text(values: Sequence[float]) -> str:
     return f"{p05:.3f}/{p50:.3f}/{p95:.3f}"
 
 
-def _single_mask_passes_v6_qc(record: FaceMaskRecord) -> bool:
+def _validate_qc_skin_face_density_max(value: float) -> None:
+    if not QC_SKIN_FACE_DENSITY_MIN <= value <= 1.0:
+        raise ValueError(
+            "QC skin/face density maximum must be between "
+            f"{QC_SKIN_FACE_DENSITY_MIN:.2f} and 1.0"
+        )
+
+
+def _single_mask_passes_qc(
+    record: FaceMaskRecord,
+    skin_face_density_max: float,
+) -> bool:
     return (
         record.detected
-        and V6_QC_SKIN_MIN_FRACTION
+        and QC_SKIN_MIN_FRACTION
         <= record.skin_fraction
-        <= V6_QC_SKIN_MAX_FRACTION
-        and V6_QC_FACE_MIN_FRACTION
+        <= QC_SKIN_MAX_FRACTION
+        and QC_FACE_MIN_FRACTION
         <= record.roi_fraction
-        <= V6_QC_FACE_MAX_FRACTION
-        and V6_QC_SKIN_FACE_DENSITY_MIN
+        <= QC_FACE_MAX_FRACTION
+        and QC_SKIN_FACE_DENSITY_MIN
         <= record.skin_face_density
-        <= V6_QC_SKIN_FACE_DENSITY_MAX
+        <= skin_face_density_max
     )
 
 
-def summarize_quality(records: Sequence[FaceMaskRecord]) -> str:
-    """Return privacy-safe, pre-transform QC using the v6 single-mask gates."""
+def summarize_quality(
+    records: Sequence[FaceMaskRecord],
+    *,
+    skin_face_density_max: float = (
+        DEFAULT_QC_SKIN_FACE_DENSITY_MAX
+    ),
+) -> str:
+    """Return privacy-safe, pre-transform QC using configured mask gates."""
+    _validate_qc_skin_face_density_max(skin_face_density_max)
     lines = [
         "Face-mask pre-transform QC",
         (
             "thresholds: skin_fraction=[0.005,0.500] "
             "face_fraction=[0.010,0.350] "
-            "skin/face_density=[0.100,0.900]"
+            "skin/face_density="
+            f"[0.100,{skin_face_density_max:.3f}]"
         ),
         "p05/p50/p95 values are fractions in [0,1].",
     ]
@@ -555,29 +575,35 @@ def summarize_quality(records: Sequence[FaceMaskRecord]) -> str:
             if record.split == split and record.domain == domain
         ]
         detected = [record for record in group if record.detected]
-        usable = sum(_single_mask_passes_v6_qc(record) for record in group)
+        usable = sum(
+            _single_mask_passes_qc(
+                record,
+                skin_face_density_max=skin_face_density_max,
+            )
+            for record in group
+        )
         total_usable += usable
         face_outside = sum(
             not (
-                V6_QC_FACE_MIN_FRACTION
+                QC_FACE_MIN_FRACTION
                 <= record.roi_fraction
-                <= V6_QC_FACE_MAX_FRACTION
+                <= QC_FACE_MAX_FRACTION
             )
             for record in detected
         )
         skin_outside = sum(
             not (
-                V6_QC_SKIN_MIN_FRACTION
+                QC_SKIN_MIN_FRACTION
                 <= record.skin_fraction
-                <= V6_QC_SKIN_MAX_FRACTION
+                <= QC_SKIN_MAX_FRACTION
             )
             for record in detected
         )
         density_outside = sum(
             not (
-                V6_QC_SKIN_FACE_DENSITY_MIN
+                QC_SKIN_FACE_DENSITY_MIN
                 <= record.skin_face_density
-                <= V6_QC_SKIN_FACE_DENSITY_MAX
+                <= skin_face_density_max
             )
             for record in detected
         )
@@ -863,6 +889,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview-samples", type=int, default=30)
     parser.add_argument("--panel-size", type=int, default=256)
     parser.add_argument(
+        "--qc-skin-face-density-max",
+        type=float,
+        default=DEFAULT_QC_SKIN_FACE_DENSITY_MAX,
+        help=(
+            "Upper skin-pixel density used only by the offline QC summary. "
+            "The v7 default is 1.0; use 0.9 to reproduce the v6 check."
+        ),
+    )
+    parser.add_argument(
         "--progress-every",
         type=int,
         default=25,
@@ -890,6 +925,12 @@ def main() -> None:
         raise SystemExit("ERROR: --panel-size must be at least 64")
     if args.progress_every < 0:
         raise SystemExit("ERROR: --progress-every cannot be negative")
+    try:
+        _validate_qc_skin_face_density_max(
+            args.qc_skin_face_density_max
+        )
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
 
     try:
         detector = OpenCVHaarFaceDetector(
@@ -909,7 +950,15 @@ def main() -> None:
             progress_every=args.progress_every,
         )
         print(summarize_records(records), flush=True)
-        print(summarize_quality(records), flush=True)
+        print(
+            summarize_quality(
+                records,
+                skin_face_density_max=(
+                    args.qc_skin_face_density_max
+                ),
+            ),
+            flush=True,
+        )
         print(f"Masks saved under: {args.output_root}", flush=True)
         if args.preview_samples > 0:
             preview_output = (

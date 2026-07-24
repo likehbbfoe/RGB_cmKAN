@@ -64,6 +64,12 @@ def test_auxiliary_report_defaults_use_external_experiment_directory() -> None:
     external_root = (PROJECT_ROOT.parent / "experiment").resolve()
 
     assert FALLBACK_METRICS_PATH.is_relative_to(external_root)
+    assert (
+        FALLBACK_METRICS_PATH
+        == external_root
+        / "custom_one_to_one_reference_color_v7_face_skin"
+        / "logs/metrics.csv"
+    )
     assert DEFAULT_OUTPUT.is_relative_to(external_root)
 
 

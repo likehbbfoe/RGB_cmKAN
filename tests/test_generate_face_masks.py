@@ -268,6 +268,45 @@ def test_quality_summary_is_aggregate_and_privacy_safe() -> None:
     assert "/private" not in summary
 
 
+def test_quality_summary_defaults_to_v7_density_gate() -> None:
+    record = FaceMaskRecord(
+        split="val",
+        domain="source",
+        image_path=Path("/private/portrait.jpg"),
+        mask_path=Path("/private/portrait.png"),
+        face_box=None,
+        detected_override=True,
+        roi_fraction=0.12,
+        skin_fraction=0.114,
+        skin_face_density=0.95,
+    )
+
+    v7_summary = summarize_quality([record])
+    v6_summary = summarize_quality(
+        [record],
+        skin_face_density_max=0.90,
+    )
+
+    assert "skin/face_density=[0.100,1.000]" in v7_summary
+    assert "val/source: usable=1/1" in v7_summary
+    assert "density_outside=0" in v7_summary
+    assert "skin/face_density=[0.100,0.900]" in v6_summary
+    assert "val/source: usable=0/1" in v6_summary
+    assert "density_outside=1" in v6_summary
+
+
+def test_quality_summary_rejects_invalid_density_maximum() -> None:
+    for value in (0.09, 1.01):
+        try:
+            summarize_quality([], skin_face_density_max=value)
+        except ValueError as exc:
+            assert "density maximum" in str(exc)
+        else:
+            raise AssertionError(
+                f"Expected invalid density maximum {value} to fail"
+            )
+
+
 def test_progress_reports_first_interval_and_last(
     tmp_path: Path,
     capsys,
