@@ -41,6 +41,13 @@ class UnsupervisedPipeline(L.LightningModule):
         reference_style_weight: float = 0.0,
         reference_white_balance_weight: float = 0.0,
         reference_white_balance_ramp_epochs: int = 0,
+        reference_environment_weight: float = 0.0,
+        reference_environment_ramp_epochs: int = 0,
+        reference_environment_chroma_std_weight: float = 0.20,
+        reference_environment_luminance_weight: float = 0.25,
+        reference_environment_luminance_std_weight: float = 0.10,
+        reference_environment_face_dilation: int = 9,
+        reference_environment_min_cell_fraction: float = 0.05,
         reference_skin_tone_weight: float = 0.0,
         reference_skin_tone_ramp_epochs: int = 0,
         reference_skin_require_face_mask: bool = False,
@@ -96,6 +103,33 @@ class UnsupervisedPipeline(L.LightningModule):
         self.reference_white_balance_ramp_epochs = (
             reference_white_balance_ramp_epochs
         )
+        self.reference_environment_weight = reference_environment_weight
+        self.reference_environment_ramp_epochs = (
+            reference_environment_ramp_epochs
+        )
+        self.reference_environment_chroma_std_weight = (
+            reference_environment_chroma_std_weight
+        )
+        self.reference_environment_luminance_weight = (
+            reference_environment_luminance_weight
+        )
+        self.reference_environment_luminance_std_weight = (
+            reference_environment_luminance_std_weight
+        )
+        self.reference_environment_face_dilation = (
+            reference_environment_face_dilation
+        )
+        self.reference_environment_min_cell_fraction = (
+            reference_environment_min_cell_fraction
+        )
+        if self.reference_environment_face_dilation < 0 or (
+            self.reference_environment_face_dilation > 0
+            and self.reference_environment_face_dilation % 2 == 0
+        ):
+            raise ValueError(
+                "reference_environment_face_dilation must be zero or a "
+                "positive odd integer"
+            )
         self.reference_skin_tone_weight = reference_skin_tone_weight
         self.reference_skin_tone_ramp_epochs = (
             reference_skin_tone_ramp_epochs
@@ -387,6 +421,322 @@ class UnsupervisedPipeline(L.LightningModule):
             tint_deltas.mean(),
             tint_deltas.abs().mean(),
         )
+
+    @classmethod
+    def _environment_background_weights(
+        cls,
+        images,
+        face_mask=None,
+        face_dilation=9,
+        eps=1e-3,
+    ):
+        """Select stable non-face pixels without discarding colored surfaces."""
+        if face_dilation < 0 or (
+            face_dilation > 0 and face_dilation % 2 == 0
+        ):
+            raise ValueError(
+                "face_dilation must be zero or a positive odd integer"
+            )
+
+        srgb = images.detach().float().clamp(0, 1)
+        linear_rgb = cls._linearize_srgb(srgb)
+        luminance = cls._luminance(linear_rgb).unsqueeze(1)
+        valid_weight = (
+            torch.sigmoid((luminance - 0.01) / 0.01)
+            * torch.sigmoid((0.98 - luminance) / 0.02)
+        )
+        channel_max = srgb.amax(dim=1, keepdim=True)
+        channel_min = srgb.amin(dim=1, keepdim=True)
+        saturation = (
+            (channel_max - channel_min) / channel_max.clamp_min(eps)
+        )
+        # Neutral pixels remain the clearest white-balance evidence, while the
+        # non-zero floor deliberately keeps beige/yellow walls and clothing in
+        # the environment color target.
+        color_weight = 0.25 + 0.75 * torch.exp(
+            -0.5 * (saturation / 0.45).square()
+        )
+
+        if face_mask is None:
+            background_mask = torch.ones_like(valid_weight)
+        else:
+            face_roi = cls._prepare_face_roi(
+                face_mask,
+                images,
+                "face_mask",
+            )
+            if face_dilation > 1:
+                padding = face_dilation // 2
+                face_roi = F.max_pool2d(
+                    face_roi,
+                    kernel_size=face_dilation,
+                    stride=1,
+                    padding=padding,
+                )
+            background_mask = 1 - face_roi
+        return (valid_weight * color_weight * background_mask).detach()
+
+    @classmethod
+    def _reference_environment_color_terms(
+        cls,
+        predictions,
+        inputs,
+        reference,
+        input_face_mask=None,
+        reference_face_mask=None,
+        grid_sizes=(1, 2, 4),
+        scale_weights=(0.50, 0.30, 0.20),
+        face_dilation=9,
+        face_min_fraction=0.0,
+        face_max_fraction=1.0,
+        min_cell_fraction=0.05,
+        chroma_std_weight=0.20,
+        luminance_weight=0.25,
+        luminance_std_weight=0.10,
+        eps=1e-3,
+    ):
+        """Match rough-pair environment color statistics at several scales.
+
+        Each grid cell compares color moments instead of corresponding pixels,
+        so small pose/camera shifts do not turn into a blur-inducing pixel
+        reconstruction target.  Prediction weights come from the real input
+        and all reference quantities are detached to prevent mask gaming.
+        """
+        if len(grid_sizes) != len(scale_weights) or not grid_sizes:
+            raise ValueError(
+                "grid_sizes and scale_weights must have the same non-zero length"
+            )
+        if any(size < 1 for size in grid_sizes):
+            raise ValueError("all environment grid sizes must be positive")
+        if (
+            any(weight < 0 for weight in scale_weights)
+            or sum(scale_weights) <= 0
+        ):
+            raise ValueError(
+                "environment scale weights must be non-negative with a positive sum"
+            )
+        if not 0 < min_cell_fraction <= 1:
+            raise ValueError("min_cell_fraction must be in the interval (0, 1]")
+        if not 0 <= face_min_fraction <= face_max_fraction <= 1:
+            raise ValueError(
+                "face fractions must satisfy 0 <= face_min_fraction <= "
+                "face_max_fraction <= 1"
+            )
+        if min(
+            chroma_std_weight,
+            luminance_weight,
+            luminance_std_weight,
+        ) < 0:
+            raise ValueError("environment component weights must be non-negative")
+        if (
+            predictions.shape != inputs.shape
+            or predictions.shape != reference.shape
+        ):
+            raise ValueError(
+                "environment color loss requires prediction, input, and reference "
+                f"to share a shape; got {predictions.shape}, {inputs.shape}, "
+                f"and {reference.shape}"
+            )
+        if (input_face_mask is None) != (reference_face_mask is None):
+            raise ValueError(
+                "input_face_mask and reference_face_mask must be provided "
+                "together"
+            )
+
+        # Face masks are only exclusions, not supervision targets. If either
+        # sidecar has an implausible area, ignore both for this pair so a bad
+        # detector result cannot erase most of the environment objective.
+        if input_face_mask is not None:
+            input_face_roi = cls._prepare_face_roi(
+                input_face_mask,
+                inputs,
+                "input_face_mask",
+            )
+            reference_face_roi = cls._prepare_face_roi(
+                reference_face_mask,
+                reference,
+                "reference_face_mask",
+            )
+            reduce_dims = (1, 2, 3)
+            input_face_fraction = (
+                (input_face_roi > 0.5).float().mean(dim=reduce_dims)
+            )
+            reference_face_fraction = (
+                (reference_face_roi > 0.5).float().mean(dim=reduce_dims)
+            )
+            valid_face_pair = (
+                (input_face_fraction >= face_min_fraction)
+                & (input_face_fraction <= face_max_fraction)
+                & (reference_face_fraction >= face_min_fraction)
+                & (reference_face_fraction <= face_max_fraction)
+            ).view(-1, 1, 1, 1)
+            input_face_mask = input_face_roi * valid_face_pair
+            reference_face_mask = reference_face_roi * valid_face_pair
+
+        def color_features(images):
+            linear_rgb = cls._linearize_srgb(images.float())
+            red, green, blue = linear_rgb.unbind(dim=1)
+            log_red_green = torch.log(red + eps) - torch.log(green + eps)
+            log_blue_green = torch.log(blue + eps) - torch.log(green + eps)
+            log_luminance = torch.log(
+                cls._luminance(linear_rgb).clamp_min(eps)
+            )
+            return torch.stack(
+                [log_red_green, log_blue_green, log_luminance],
+                dim=1,
+            )
+
+        prediction_features = color_features(predictions)
+        reference_features = color_features(reference).detach()
+        prediction_weights = cls._environment_background_weights(
+            inputs,
+            input_face_mask,
+            face_dilation=face_dilation,
+            eps=eps,
+        )
+        reference_weights = cls._environment_background_weights(
+            reference,
+            reference_face_mask,
+            face_dilation=face_dilation,
+            eps=eps,
+        )
+
+        def pooled_moments(features, weights, grid_size):
+            output_size = (grid_size, grid_size)
+            pooled_weights = F.adaptive_avg_pool2d(weights, output_size)
+            mean = (
+                F.adaptive_avg_pool2d(features * weights, output_size)
+                / pooled_weights.clamp_min(1e-6)
+            )
+            second_moment = (
+                F.adaptive_avg_pool2d(
+                    features.square() * weights,
+                    output_size,
+                )
+                / pooled_weights.clamp_min(1e-6)
+            )
+            standard_deviation = (
+                second_moment - mean.square()
+            ).clamp_min(1e-8).sqrt()
+            return mean, standard_deviation, pooled_weights
+
+        def valid_mean(values, valid_cells):
+            valid = valid_cells.to(values)
+            per_image_count = valid.sum(dim=(1, 2, 3))
+            per_image_value = (
+                (values * valid).sum(dim=(1, 2, 3))
+                / per_image_count.clamp_min(1)
+            )
+            valid_images = (per_image_count > 0).to(values)
+            return (
+                (per_image_value * valid_images).sum()
+                / valid_images.sum().clamp_min(1)
+            )
+
+        normalized_scale_weights = tuple(
+            weight / sum(scale_weights) for weight in scale_weights
+        )
+        component_totals = {
+            "chroma_mean_loss": predictions.sum() * 0,
+            "chroma_std_loss": predictions.sum() * 0,
+            "luminance_mean_loss": predictions.sum() * 0,
+            "luminance_std_loss": predictions.sum() * 0,
+            "warm_abs": predictions.sum() * 0,
+            "tint_abs": predictions.sum() * 0,
+        }
+        scale_losses = {}
+        valid_scale_images = predictions.new_zeros(())
+
+        for grid_size, scale_weight in zip(
+            grid_sizes,
+            normalized_scale_weights,
+        ):
+            prediction_mean, prediction_std, prediction_cell_weights = (
+                pooled_moments(
+                    prediction_features,
+                    prediction_weights,
+                    grid_size,
+                )
+            )
+            reference_mean, reference_std, reference_cell_weights = (
+                pooled_moments(
+                    reference_features,
+                    reference_weights,
+                    grid_size,
+                )
+            )
+            valid_cells = (
+                (prediction_cell_weights >= min_cell_fraction)
+                & (reference_cell_weights >= min_cell_fraction)
+            )
+            valid_per_image = valid_cells.flatten(1).any(dim=1)
+            valid_scale_images = (
+                valid_scale_images + valid_per_image.float().sum()
+            )
+
+            mean_delta = prediction_mean - reference_mean
+            std_delta = prediction_std - reference_std
+            chroma_mean = valid_mean(
+                cls._charbonnier(mean_delta[:, :2]).mean(
+                    dim=1,
+                    keepdim=True,
+                ),
+                valid_cells,
+            )
+            chroma_std = valid_mean(
+                cls._charbonnier(std_delta[:, :2]).mean(
+                    dim=1,
+                    keepdim=True,
+                ),
+                valid_cells,
+            )
+            luminance_mean = valid_mean(
+                cls._charbonnier(mean_delta[:, 2:3]),
+                valid_cells,
+            )
+            luminance_std = valid_mean(
+                cls._charbonnier(std_delta[:, 2:3]),
+                valid_cells,
+            )
+            warm = 0.5 * (mean_delta[:, :1] - mean_delta[:, 1:2])
+            tint = 0.5 * (mean_delta[:, :1] + mean_delta[:, 1:2])
+            warm_abs = valid_mean(warm.abs(), valid_cells)
+            tint_abs = valid_mean(tint.abs(), valid_cells)
+            scale_loss = (
+                chroma_mean
+                + chroma_std_weight * chroma_std
+                + luminance_weight * luminance_mean
+                + luminance_std_weight * luminance_std
+            )
+            scale_losses[f"scale_{grid_size}_loss"] = scale_loss
+            for name, value in (
+                ("chroma_mean_loss", chroma_mean),
+                ("chroma_std_loss", chroma_std),
+                ("luminance_mean_loss", luminance_mean),
+                ("luminance_std_loss", luminance_std),
+                ("warm_abs", warm_abs),
+                ("tint_abs", tint_abs),
+            ):
+                component_totals[name] = (
+                    component_totals[name] + scale_weight * value
+                )
+
+        total_loss = (
+            component_totals["chroma_mean_loss"]
+            + chroma_std_weight * component_totals["chroma_std_loss"]
+            + luminance_weight * component_totals["luminance_mean_loss"]
+            + luminance_std_weight
+            * component_totals["luminance_std_loss"]
+        )
+        valid_fraction = valid_scale_images / (
+            predictions.shape[0] * len(grid_sizes)
+        )
+        return {
+            "loss": total_loss,
+            **component_totals,
+            **scale_losses,
+            "valid_fraction": valid_fraction,
+        }
 
     @staticmethod
     def _soft_skin_mask(images):
@@ -872,6 +1222,57 @@ class UnsupervisedPipeline(L.LightningModule):
             ),
         )
 
+    def _configured_reference_environment_color_terms(
+        self,
+        predictions,
+        inputs,
+        reference,
+        input_face_mask=None,
+        reference_face_mask=None,
+    ):
+        return self._reference_environment_color_terms(
+            predictions,
+            inputs,
+            reference,
+            input_face_mask=input_face_mask,
+            reference_face_mask=reference_face_mask,
+            face_dilation=self.reference_environment_face_dilation,
+            face_min_fraction=self.reference_face_min_fraction,
+            face_max_fraction=self.reference_face_max_fraction,
+            min_cell_fraction=(
+                self.reference_environment_min_cell_fraction
+            ),
+            chroma_std_weight=(
+                self.reference_environment_chroma_std_weight
+            ),
+            luminance_weight=(
+                self.reference_environment_luminance_weight
+            ),
+            luminance_std_weight=(
+                self.reference_environment_luminance_std_weight
+            ),
+        )
+
+    @staticmethod
+    def _zero_reference_environment_color_terms(predictions):
+        zero = predictions.sum() * 0
+        return {
+            name: zero
+            for name in (
+                "loss",
+                "chroma_mean_loss",
+                "chroma_std_loss",
+                "luminance_mean_loss",
+                "luminance_std_loss",
+                "warm_abs",
+                "tint_abs",
+                "scale_1_loss",
+                "scale_2_loss",
+                "scale_4_loss",
+                "valid_fraction",
+            )
+        }
+
     @staticmethod
     def _zero_reference_skin_tone_terms(predictions):
         zero = predictions.sum() * 0
@@ -928,6 +1329,13 @@ class UnsupervisedPipeline(L.LightningModule):
         return self._ramped_weight(
             self.reference_white_balance_weight,
             self.reference_white_balance_ramp_epochs,
+            self.current_epoch,
+        )
+
+    def _effective_reference_environment_weight(self):
+        return self._ramped_weight(
+            self.reference_environment_weight,
+            self.reference_environment_ramp_epochs,
             self.current_epoch,
         )
 
@@ -1548,6 +1956,39 @@ class UnsupervisedPipeline(L.LightningModule):
         effectiveReferenceWhiteBalanceWeight = (
             self._effective_reference_white_balance_weight()
         )
+        useEnvironmentObjective = self.reference_environment_weight > 0
+        if useEnvironmentObjective:
+            environmentTermsA = (
+                self._configured_reference_environment_color_terms(
+                    fakeA,
+                    imgB,
+                    imgA,
+                    input_face_mask=target_face_mask,
+                    reference_face_mask=source_face_mask,
+                )
+            )
+            environmentTermsB = (
+                self._configured_reference_environment_color_terms(
+                    fakeB,
+                    imgA,
+                    imgB,
+                    input_face_mask=source_face_mask,
+                    reference_face_mask=target_face_mask,
+                )
+            )
+        else:
+            environmentTermsA = (
+                self._zero_reference_environment_color_terms(fakeA)
+            )
+            environmentTermsB = (
+                self._zero_reference_environment_color_terms(fakeB)
+            )
+        referenceEnvironmentLoss = (
+            environmentTermsA["loss"] + environmentTermsB["loss"]
+        )
+        effectiveReferenceEnvironmentWeight = (
+            self._effective_reference_environment_weight()
+        )
         useSkinToneObjective = self.reference_skin_tone_weight > 0
         if useSkinToneObjective:
             skinTermsA = self._configured_reference_skin_tone_terms(
@@ -1668,6 +2109,10 @@ class UnsupervisedPipeline(L.LightningModule):
             + self.patch_nce_weight * patchNceLoss
             + self.reference_style_weight * referenceStyleLoss
             + effectiveReferenceWhiteBalanceWeight * referenceWhiteBalanceLoss
+            + (
+                effectiveReferenceEnvironmentWeight
+                * referenceEnvironmentLoss
+            )
             + effectiveReferenceSkinToneWeight * referenceSkinToneLoss
             + self.reference_local_chroma_weight * referenceLocalChromaLoss
             + (
@@ -1723,6 +2168,46 @@ class UnsupervisedPipeline(L.LightningModule):
         self._log_loss(
             'gen_reference_white_balance_b_loss',
             referenceWhiteBalanceB,
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_environment_a_loss',
+            environmentTermsA['loss'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_environment_b_loss',
+            environmentTermsB['loss'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_environment_b_chroma_mean_loss',
+            environmentTermsB['chroma_mean_loss'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_environment_b_luminance_mean_loss',
+            environmentTermsB['luminance_mean_loss'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_environment_b_warm_abs',
+            environmentTermsB['warm_abs'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_environment_b_tint_abs',
+            environmentTermsB['tint_abs'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_environment_b_valid_fraction',
+            environmentTermsB['valid_fraction'],
+            batch_size,
+        )
+        self._log_loss(
+            'effective_reference_environment_weight',
+            fakeB.new_tensor(effectiveReferenceEnvironmentWeight),
             batch_size,
         )
         self._log_loss(
@@ -1965,12 +2450,15 @@ class UnsupervisedPipeline(L.LightningModule):
             )
         if (
             self.reference_skin_require_face_mask
-            and self.reference_skin_tone_weight > 0
+            and (
+                self.reference_skin_tone_weight > 0
+                or self.reference_environment_weight > 0
+            )
             and source_face_mask is None
         ):
             raise ValueError(
-                "This skin-tone configuration requires face masks, but the "
-                "batch has none. Generate the sidecars and configure "
+                "This reference color configuration requires face masks, but "
+                "the batch has none. Generate the sidecars and configure "
                 "data.params.face_mask_root."
             )
         return source_face_mask, target_face_mask
@@ -2074,6 +2562,40 @@ class UnsupervisedPipeline(L.LightningModule):
         )
         effective_reference_white_balance_weight = (
             self._effective_reference_white_balance_weight()
+        )
+        use_environment_objective = self.reference_environment_weight > 0
+        if use_environment_objective:
+            fake_source_environment_terms = (
+                self._configured_reference_environment_color_terms(
+                    fake_source,
+                    target,
+                    source,
+                    input_face_mask=target_face_mask,
+                    reference_face_mask=source_face_mask,
+                )
+            )
+            fake_target_environment_terms = (
+                self._configured_reference_environment_color_terms(
+                    fake_target,
+                    source,
+                    target,
+                    input_face_mask=source_face_mask,
+                    reference_face_mask=target_face_mask,
+                )
+            )
+        else:
+            fake_source_environment_terms = (
+                self._zero_reference_environment_color_terms(fake_source)
+            )
+            fake_target_environment_terms = (
+                self._zero_reference_environment_color_terms(fake_target)
+            )
+        reference_environment_loss = (
+            fake_source_environment_terms["loss"]
+            + fake_target_environment_terms["loss"]
+        )
+        effective_reference_environment_weight = (
+            self._effective_reference_environment_weight()
         )
         use_skin_tone_objective = self.reference_skin_tone_weight > 0
         if use_skin_tone_objective:
@@ -2207,6 +2729,10 @@ class UnsupervisedPipeline(L.LightningModule):
                 * reference_white_balance_loss
             )
             + (
+                effective_reference_environment_weight
+                * reference_environment_loss
+            )
+            + (
                 effective_reference_skin_tone_weight
                 * reference_skin_tone_loss
             )
@@ -2276,6 +2802,24 @@ class UnsupervisedPipeline(L.LightningModule):
                 source_target_skin_terms = (
                     self._zero_reference_skin_tone_terms(source)
                 )
+            if use_environment_objective:
+                source_target_environment_terms = (
+                    self._configured_reference_environment_color_terms(
+                        source,
+                        source,
+                        target,
+                        input_face_mask=source_face_mask,
+                        reference_face_mask=target_face_mask,
+                    )
+                )
+            else:
+                source_target_environment_terms = (
+                    self._zero_reference_environment_color_terms(source)
+                )
+            environment_ratio = (
+                fake_target_environment_terms["loss"]
+                / source_target_environment_terms["loss"].clamp_min(1e-6)
+            )
             selection_style_weight = (
                 5.0 if use_skin_tone_objective else 10.0
             )
@@ -2290,6 +2834,7 @@ class UnsupervisedPipeline(L.LightningModule):
             reference_selection_loss = (
                 selection_style_weight * fake_distance
                 + skin_selection_loss
+                + 2.0 * fake_target_environment_terms["loss"]
                 + cycle_loss
                 + identity_loss
                 + reference_white_balance_loss
@@ -2339,6 +2884,20 @@ class UnsupervisedPipeline(L.LightningModule):
             f'{stage}_effective_reference_white_balance_weight',
             reference_white_balance_loss.new_tensor(
                 effective_reference_white_balance_weight
+            ),
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_reference_environment_loss',
+            reference_environment_loss,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_effective_reference_environment_weight',
+            reference_environment_loss.new_tensor(
+                effective_reference_environment_weight
             ),
             prog_bar=False,
             logger=True,
@@ -2454,6 +3013,52 @@ class UnsupervisedPipeline(L.LightningModule):
                 prog_bar=False,
                 logger=True,
             )
+            environment_log_values = {
+                'fake_target_environment_loss': (
+                    fake_target_environment_terms['loss']
+                ),
+                'source_target_environment_loss': (
+                    source_target_environment_terms['loss']
+                ),
+                'environment_ratio': environment_ratio,
+                'fake_target_environment_chroma_mean_loss': (
+                    fake_target_environment_terms['chroma_mean_loss']
+                ),
+                'fake_target_environment_chroma_std_loss': (
+                    fake_target_environment_terms['chroma_std_loss']
+                ),
+                'fake_target_environment_luminance_mean_loss': (
+                    fake_target_environment_terms['luminance_mean_loss']
+                ),
+                'fake_target_environment_luminance_std_loss': (
+                    fake_target_environment_terms['luminance_std_loss']
+                ),
+                'fake_target_environment_warm_abs': (
+                    fake_target_environment_terms['warm_abs']
+                ),
+                'fake_target_environment_tint_abs': (
+                    fake_target_environment_terms['tint_abs']
+                ),
+                'fake_target_environment_scale_1_loss': (
+                    fake_target_environment_terms['scale_1_loss']
+                ),
+                'fake_target_environment_scale_2_loss': (
+                    fake_target_environment_terms['scale_2_loss']
+                ),
+                'fake_target_environment_scale_4_loss': (
+                    fake_target_environment_terms['scale_4_loss']
+                ),
+                'fake_target_environment_valid_fraction': (
+                    fake_target_environment_terms['valid_fraction']
+                ),
+            }
+            for metric_name, metric_value in environment_log_values.items():
+                self.log(
+                    f'{stage}_{metric_name}',
+                    metric_value,
+                    prog_bar=False,
+                    logger=True,
+                )
             skin_log_values = {
                 'fake_target_skin_loss': fake_target_skin_terms['loss'],
                 'fake_target_skin_tone_loss': (

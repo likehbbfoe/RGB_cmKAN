@@ -52,6 +52,27 @@ class PipelineSelector:
                     reference_white_balance_ramp_epochs=(
                         config.pipeline.params.reference_white_balance_ramp_epochs
                     ),
+                    reference_environment_weight=(
+                        config.pipeline.params.reference_environment_weight
+                    ),
+                    reference_environment_ramp_epochs=(
+                        config.pipeline.params.reference_environment_ramp_epochs
+                    ),
+                    reference_environment_chroma_std_weight=(
+                        config.pipeline.params.reference_environment_chroma_std_weight
+                    ),
+                    reference_environment_luminance_weight=(
+                        config.pipeline.params.reference_environment_luminance_weight
+                    ),
+                    reference_environment_luminance_std_weight=(
+                        config.pipeline.params.reference_environment_luminance_std_weight
+                    ),
+                    reference_environment_face_dilation=(
+                        config.pipeline.params.reference_environment_face_dilation
+                    ),
+                    reference_environment_min_cell_fraction=(
+                        config.pipeline.params.reference_environment_min_cell_fraction
+                    ),
                     reference_skin_tone_weight=(
                         config.pipeline.params.reference_skin_tone_weight
                     ),

@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FALLBACK_METRICS_PATH = (
     PROJECT_ROOT.parent
     / "experiment"
-    / "custom_one_to_one_reference_color_v7_face_skin"
+    / "custom_one_to_one_reference_color_v8_environment"
     / "logs"
     / "metrics.csv"
 )
@@ -85,6 +85,34 @@ FACE_OUTPUT_METRICS = (
     ("target_face_skin", "val_target_skin_face_density"),
     ("face_area_ratio", "val_face_pair_area_ratio"),
     ("face_center_distance", "val_face_pair_center_distance"),
+)
+
+ENVIRONMENT_OUTPUT_METRICS = (
+    ("env_ratio", "val_environment_ratio"),
+    ("env_loss", "val_fake_target_environment_loss"),
+    ("env_base", "val_source_target_environment_loss"),
+    (
+        "env_chroma",
+        "val_fake_target_environment_chroma_mean_loss",
+    ),
+    (
+        "env_chroma_std",
+        "val_fake_target_environment_chroma_std_loss",
+    ),
+    (
+        "env_luma",
+        "val_fake_target_environment_luminance_mean_loss",
+    ),
+    (
+        "env_luma_std",
+        "val_fake_target_environment_luminance_std_loss",
+    ),
+    ("env_warm", "val_fake_target_environment_warm_abs"),
+    ("env_tint", "val_fake_target_environment_tint_abs"),
+    ("env_scale1", "val_fake_target_environment_scale_1_loss"),
+    ("env_scale2", "val_fake_target_environment_scale_2_loss"),
+    ("env_scale4", "val_fake_target_environment_scale_4_loss"),
+    ("env_valid", "val_fake_target_environment_valid_fraction"),
 )
 
 LEGACY_OUTPUT_METRICS = (
@@ -168,6 +196,7 @@ ALL_OUTPUT_METRICS = (
     LEGACY_OUTPUT_METRICS
     + SAFETY_OUTPUT_METRICS
     + SKIN_SAFETY_OUTPUT_METRICS
+    + ENVIRONMENT_OUTPUT_METRICS
 )
 
 VALID_GATED_SKIN_METRICS = (
@@ -187,7 +216,6 @@ VALID_GATED_SKIN_METRICS = (
     "skin_red_tail",
     "skin_red_bad",
 )
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -232,6 +260,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Print only face-ROI validity diagnostics"
+        ),
+    )
+    output_group.add_argument(
+        "--environment",
+        action="store_true",
+        help=(
+            "Print only the paired non-face environment color diagnostics"
         ),
     )
     return parser.parse_args()
@@ -318,6 +353,17 @@ def summarize_metrics(path: Path) -> tuple[int, dict[str, float | None]]:
         )
         else None
     )
+    environment_loss = summary.get("env_loss")
+    environment_baseline = summary.get("env_base")
+    summary["env_ratio"] = (
+        environment_loss / environment_baseline
+        if (
+            environment_loss is not None
+            and environment_baseline is not None
+            and environment_baseline > 1e-12
+        )
+        else None
+    )
     return latest_epoch, summary
 
 
@@ -351,6 +397,8 @@ def main() -> None:
         output_metrics = SKIN_OUTPUT_METRICS
     elif args.face:
         output_metrics = FACE_OUTPUT_METRICS
+    elif args.environment:
+        output_metrics = ENVIRONMENT_OUTPUT_METRICS
     else:
         output_metrics = COMPACT_OUTPUT_METRICS
     print(format_summary(epoch, summary, output_metrics))

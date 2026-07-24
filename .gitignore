@@ -182,6 +182,8 @@ experiments/
 !custom_unpaired_reference.server.yaml
 !custom_unpaired_reference_v6_face_skin.example.yaml
 !custom_unpaired_reference_v6_face_skin.server.yaml
+!custom_unpaired_reference_v8_environment.example.yaml
+!custom_unpaired_reference_v8_environment.server.yaml
 
 debug.ipynb
 requirements-dev.txt

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from scripts.report_reference_metrics import (
     COMPACT_OUTPUT_METRICS,
+    ENVIRONMENT_OUTPUT_METRICS,
     FACE_OUTPUT_METRICS,
     RED_OUTPUT_METRICS,
     SKIN_OUTPUT_METRICS,
@@ -74,6 +75,19 @@ def _write_metrics(path: Path) -> None:
         "val_target_skin_face_density",
         "val_face_pair_area_ratio",
         "val_face_pair_center_distance",
+        "val_fake_target_environment_loss",
+        "val_source_target_environment_loss",
+        "val_environment_ratio",
+        "val_fake_target_environment_chroma_mean_loss",
+        "val_fake_target_environment_chroma_std_loss",
+        "val_fake_target_environment_luminance_mean_loss",
+        "val_fake_target_environment_luminance_std_loss",
+        "val_fake_target_environment_warm_abs",
+        "val_fake_target_environment_tint_abs",
+        "val_fake_target_environment_scale_1_loss",
+        "val_fake_target_environment_scale_2_loss",
+        "val_fake_target_environment_scale_4_loss",
+        "val_fake_target_environment_valid_fraction",
     ]
     rows = [
         {
@@ -146,6 +160,22 @@ def _write_metrics(path: Path) -> None:
             "val_target_skin_face_density": "0.58",
             "val_face_pair_area_ratio": "1.08",
             "val_face_pair_center_distance": "0.07",
+            # Environment loss values stay exactly as Lightning aggregated
+            # them; coverage is reported separately and the ratio is derived
+            # from loss/baseline after epoch aggregation.
+            "val_fake_target_environment_loss": "0.032",
+            "val_source_target_environment_loss": "0.080",
+            "val_environment_ratio": "0.40",
+            "val_fake_target_environment_chroma_mean_loss": "0.016",
+            "val_fake_target_environment_chroma_std_loss": "0.008",
+            "val_fake_target_environment_luminance_mean_loss": "0.012",
+            "val_fake_target_environment_luminance_std_loss": "0.004",
+            "val_fake_target_environment_warm_abs": "0.024",
+            "val_fake_target_environment_tint_abs": "0.016",
+            "val_fake_target_environment_scale_1_loss": "0.024",
+            "val_fake_target_environment_scale_2_loss": "0.032",
+            "val_fake_target_environment_scale_4_loss": "0.040",
+            "val_fake_target_environment_valid_fraction": "0.80",
         },
     ]
     with path.open("w", newline="", encoding="utf-8") as metrics_file:
@@ -186,6 +216,10 @@ def test_summarize_metrics_uses_latest_validation_epoch(tmp_path: Path) -> None:
     assert math.isclose(summary["skin_ratio"], 0.40)
     assert math.isclose(summary["skin_loss"], 0.024)
     assert summary["skin_valid"] == 0.85
+    assert math.isclose(summary["env_ratio"], 0.40)
+    assert math.isclose(summary["env_loss"], 0.032)
+    assert math.isclose(summary["env_base"], 0.080)
+    assert summary["env_valid"] == 0.80
     assert format_summary(epoch, summary).startswith(
         "epoch=136 source_ref=0.030000 fake_ref=0.027000 ratio=0.900000"
     )
@@ -237,6 +271,19 @@ def test_summarize_metrics_uses_latest_validation_epoch(tmp_path: Path) -> None:
         "source_face_skin=0.620000 target_face_skin=0.580000 "
         "face_area_ratio=1.080000 face_center_distance=0.070000"
     )
+    assert format_summary(
+        epoch,
+        summary,
+        ENVIRONMENT_OUTPUT_METRICS,
+    ) == (
+        "epoch=136 env_ratio=0.400000 env_loss=0.032000 "
+        "env_base=0.080000 env_chroma=0.016000 "
+        "env_chroma_std=0.008000 env_luma=0.012000 "
+        "env_luma_std=0.004000 env_warm=0.024000 "
+        "env_tint=0.016000 env_scale1=0.024000 "
+        "env_scale2=0.032000 env_scale4=0.040000 "
+        "env_valid=0.800000"
+    )
 
 
 def test_summarize_metrics_keeps_new_metrics_optional_for_old_csv(
@@ -283,6 +330,9 @@ def test_summarize_metrics_keeps_new_metrics_optional_for_old_csv(
     assert summary["skin_ratio"] is None
     assert summary["skin_loss"] is None
     assert summary["skin_valid"] is None
+    assert summary["env_ratio"] is None
+    assert summary["env_loss"] is None
+    assert summary["env_valid"] is None
 
 
 def test_skin_report_does_not_treat_zero_valid_fraction_as_improvement(

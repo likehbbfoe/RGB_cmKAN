@@ -51,6 +51,26 @@ class UnsupervisedPipelineParams(DefaultPipelineParams):
     reference_style_weight: float = Field(default=0.0, ge=0)
     reference_white_balance_weight: float = Field(default=0.0, ge=0)
     reference_white_balance_ramp_epochs: int = Field(default=0, ge=0)
+    reference_environment_weight: float = Field(default=0.0, ge=0)
+    reference_environment_ramp_epochs: int = Field(default=0, ge=0)
+    reference_environment_chroma_std_weight: float = Field(
+        default=0.20,
+        ge=0,
+    )
+    reference_environment_luminance_weight: float = Field(
+        default=0.25,
+        ge=0,
+    )
+    reference_environment_luminance_std_weight: float = Field(
+        default=0.10,
+        ge=0,
+    )
+    reference_environment_face_dilation: int = Field(default=9, ge=0)
+    reference_environment_min_cell_fraction: float = Field(
+        default=0.05,
+        gt=0,
+        le=1,
+    )
     reference_skin_tone_weight: float = Field(default=0.0, ge=0)
     reference_skin_tone_ramp_epochs: int = Field(default=0, ge=0)
     reference_skin_require_face_mask: bool = False

@@ -1,6 +1,6 @@
 # cmKAN 自定义非配对训练与推理指南
 
-_从数据准备、CycleCmKAN 训练到参考图引导推理与服务器排错的一站式说明 · 最后核对：2026-07-23_
+_从数据准备、CycleCmKAN 训练到参考图引导推理与服务器排错的一站式说明 · 最后核对：2026-07-24_
 
 ---
 
@@ -1023,12 +1023,12 @@ CUDA_VISIBLE_DEVICES=7 \
 ./scripts/train_custom_unpaired_reference_v7_face_skin.sh
 ```
 
-不要把 v6 的第 78 轮 checkpoint 续接进来。完成第一次验证后，无参数报告脚本默认
-读取 v7：
+不要把 v6 的第 78 轮 checkpoint 续接进来。如果要复查历史 v7，显式传入它的 CSV：
 
 ```bash
-python scripts/report_reference_metrics.py --face
-python scripts/report_reference_metrics.py --skin
+python scripts/report_reference_metrics.py \
+  ../experiment/custom_one_to_one_reference_color_v7_face_skin/logs/metrics.csv \
+  --face
 ```
 
 先确认 `skin_valid` 相比 v6 的 `0.03` 显著提高，再观察 `skin_ratio`、局部红色指标
@@ -1044,13 +1044,115 @@ scripts/generate_face_masks.py
 scripts/report_reference_metrics.py
 ```
 
+### v8：利用粗配对监督人物以外的环境颜色
+
+v7 把人脸肤色监督覆盖率修复后，人物和背景仍可能整体贴近 source，色温也与当前
+target 参考图一眼可见地不同。这不是生成时切 patch 拼接造成的：推理直接处理整张
+图片，`patch_nce_num_patches` 也是特征采样点数量。真正的问题是此前一一对应数据只
+用于选择参考图和同步裁剪；target 仍主要被压成 10 个整图统计量，没有直接监督墙面、
+衣服、人体以外区域的粗略空间颜色。
+
+v8 新增空间金字塔环境颜色目标。对 source → target 方向：
+
+```text
+生成结果统计区域 = source 人脸 ROI 用 9×9 核膨胀后的补集
+目标统计区域     = target 人脸 ROI 用 9×9 核膨胀后的补集
+```
+
+随后在线性 RGB 中提取 `log(R/G)`、`log(B/G)` 和 `log(Y)`，分别在 `1×1`、`2×2`、
+`4×4` 网格内比较加权均值和标准差。网格权重为 `0.50 / 0.30 / 0.20`，全局色温
+最强，粗区域颜色次之。它比较格子内统计量，不比较同位置像素，因此不会因为人物姿态
+或镜头有少量位移而像像素 L1 那样推动模糊。
+
+这里的“环境”准确含义是“非人脸区域”，不是语义背景分割。身体、衣服、手和人脸
+框外的前景仍会参与统计；这正适合前置摄像图片中人体占比较大的情况，但不要把它理解
+成只约束墙面。若一对 sidecar 中任一人脸 mask 的面积不在现有
+`reference_face_min_fraction`～`reference_face_max_fraction` 范围内，v8 会对这一对
+图片同时忽略 face mask，避免一次过大的误检直接删掉大半环境监督。
+
+v8 相对 v7 的关键配置为：
+
+```yaml
+exposure_weight: 0.5
+reference_style_weight: 5.0
+reference_white_balance_weight: 1.0
+
+reference_environment_weight: 2.0
+reference_environment_ramp_epochs: 10
+reference_environment_chroma_std_weight: 0.20
+reference_environment_luminance_weight: 0.25
+reference_environment_luminance_std_weight: 0.10
+reference_environment_face_dilation: 9
+reference_environment_min_cell_fraction: 0.05
+```
+
+`exposure_weight` 从 `2.0` 降到 `0.5`，减少输出亮度/对比度被拉回 source 的压力；
+style 只从 `3.0` 小幅提高到 `5.0`，不会回到已经证明容易整体偏红的 `15`。环境
+权重在前 10 轮线性增加，原有肤色、局部红斑、整图红色过冲和有界输出保护全部保留。
+`crop_size=256`、`resize_size=286`、`batch_size=8` 暂时不变，以便确认改进来自环境
+监督，而不是同时改变 patch/crop 与 batch。
+
+现有 `/home/share/y50063074/data_face_masks` 直接复用。v8 使用独立目录并必须从
+第 0 轮训练：
+
+```text
+configs/custom_unpaired_reference_v8_environment.server.yaml
+scripts/train_custom_unpaired_reference_v8_environment.sh
+../experiment/custom_one_to_one_reference_color_v8_environment/
+```
+
+启动：
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=7 \
+./scripts/train_custom_unpaired_reference_v8_environment.sh
+```
+
+不要续训 v7 或更早的偏色 checkpoint。第一次验证完成后运行：
+
+```bash
+python scripts/report_reference_metrics.py --environment
+python scripts/report_reference_metrics.py --skin
+```
+
+环境短报告中：
+
+- `env_ratio = env_loss / env_base`：小于 `1` 才表示 fake 的非脸环境比原 source
+  更接近对应 target；建议先看它是否持续下降；
+- `env_warm`、`env_tint`：环境冷暖和绿—洋红方向差异，越小越好；
+- `env_scale1/2/4`：整图、2×2、4×4 粗区域误差；
+- `env_valid`：具有足够有效非脸区域的“样本×空间尺度”比例；
+- `env_luma`：环境亮度差异；它不再被强制贴住 source。
+
+最佳 checkpoint 的 `val_reference_selection_loss` 已加入正向环境误差，因此自动
+保存的 best 不会只看整图统计和肤色，而忽略背景/人体外区域。若 20～30 轮后
+`env_ratio` 仍接近 `1`，先把 `reference_environment_weight` 从 `2.0` 调到 `3.0`；
+暂时不要超过 `4.0`，也不要把 style 再改到 `15`。
+
+服务器不能直接拉取时，最省事是覆盖整个 `cm_kan/`，再复制：
+
+```text
+configs/custom_unpaired_reference_v8_environment.server.yaml
+scripts/train_custom_unpaired_reference_v8_environment.sh
+scripts/report_reference_metrics.py
+```
+
+若只能逐文件转移，至少还要覆盖：
+
+```text
+cm_kan/core/config/pipeline.py
+cm_kan/core/selector/pipeline.py
+cm_kan/ml/pipelines/unsupervised.py
+```
+
 ### 用一张参考图推理
 
 下面会把同一张参考图广播给输入目录中的所有 source 图片：
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v7_face_skin.server.yaml \
+  --config configs/custom_unpaired_reference_v8_environment.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /absolute/path/to/source_images \
   --reference /absolute/path/to/target_reference.jpg \
@@ -1061,8 +1163,8 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
 省略 `--output` 时，图片默认写入
 `../experiment/<experiment>/predictions/`。
 
-推理必须使用训练这个 checkpoint 时的同一份 YAML。v7 checkpoint 应搭配 v7
-YAML，v6/v5/v4 checkpoint 仍分别搭配各自 YAML。face mask 只约束训练期的 skin
+推理必须使用训练这个 checkpoint 时的同一份 YAML。v8 checkpoint 应搭配 v8
+YAML，v7/v6/v5/v4 checkpoint 仍分别搭配各自 YAML。face mask 只约束训练期的 skin
 loss，普通推理不需要为输入图片再生成 mask。`reference_direct_conditioning`、
 `output_mode` 与 `max_logit_shift` 都是配置行为；配置不一致会改变模型结构、输出
 范围或颜色变化幅度。
@@ -1077,12 +1179,12 @@ loss，普通推理不需要为输入图片再生成 mask。`reference_direct_co
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 \
-CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v7_face_skin.server.yaml \
+CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v8_environment.server.yaml \
 ./scripts/predict_reference_guided.sh /absolute/path/to/target_reference.jpg
 ```
 
 该推理封装脚本为了兼容旧 checkpoint，默认仍指向 v2 配置；使用 v3 checkpoint 时
-必须显式传 v3 YAML，使用 v4/v5/v6/v7 checkpoint 时也必须显式传对应 YAML；也可以
+必须显式传 v3 YAML，使用 v4/v5/v6/v7/v8 checkpoint 时也必须显式传对应 YAML；也可以
 直接使用前面的完整 `main.py predict` 命令。
 
 ### 同一 source 更换参考图的对照检验
@@ -1092,7 +1194,7 @@ CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v7_face_skin.server.yaml \
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v7_face_skin.server.yaml \
+  --config configs/custom_unpaired_reference_v8_environment.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/warm_target.jpg \
@@ -1100,7 +1202,7 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --batch_size 1
 
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v7_face_skin.server.yaml \
+  --config configs/custom_unpaired_reference_v8_environment.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/cool_target.jpg \
@@ -1185,6 +1287,13 @@ python main.py train \
 | `reference_style_weight` | 每张生成结果靠近本次参考图颜色统计的约束权重 |
 | `reference_white_balance_weight` | 生成结果匹配参考图中性/中间调区域白平衡的约束权重 |
 | `reference_white_balance_ramp_epochs` | 从第 0 轮起把白平衡权重线性升到设定值所用轮数 |
+| `reference_environment_weight` | v8 一一对应非脸区域空间金字塔颜色监督权重 |
+| `reference_environment_ramp_epochs` | 从第 0 轮起把环境颜色权重线性升到设定值所用轮数 |
+| `reference_environment_chroma_std_weight` | 每个粗网格内色度离散程度的匹配权重 |
+| `reference_environment_luminance_weight` | 每个粗网格内平均亮度的匹配权重 |
+| `reference_environment_luminance_std_weight` | 每个粗网格内亮度离散程度的匹配权重 |
+| `reference_environment_face_dilation` | 排除人脸前使用的膨胀核大小；`0` 表示不膨胀 |
+| `reference_environment_min_cell_fraction` | 一个粗网格参与环境 loss 所需的最小有效区域比例 |
 | `reference_local_chroma_weight` | 保留全局通道增益后，限制局部相对色度漂移的权重 |
 | `reference_local_chroma_tail_weight` | 重点惩罚最严重局部色度漂移的权重 |
 | `reference_local_red_tail_weight` | 重点惩罚局部 `log(R/G)` 正向异常的权重 |
@@ -1301,6 +1410,11 @@ source/target 仍来自数据加载器给出的一对一样本，不会跨组重
 - `gen_patch_nce_a_loss`、`gen_patch_nce_b_loss`
 - `gen_reference_style_a_loss`、`gen_reference_style_b_loss`（参考图模式）
 - `gen_reference_white_balance_a_loss`、`gen_reference_white_balance_b_loss`（白平衡监督）
+- `gen_reference_environment_a_loss`、`gen_reference_environment_b_loss`
+  （v8 一一对应非脸区域空间金字塔颜色误差）
+- `gen_reference_environment_b_warm_abs`、`gen_reference_environment_b_tint_abs`
+  （正向环境冷暖与绿—洋红偏差）
+- `gen_reference_environment_b_valid_fraction`、`effective_reference_environment_weight`
 - `gen_reference_skin_tone_a_loss`、`gen_reference_skin_tone_b_loss`（v5 候选肤色监督）
 - `gen_reference_skin_uniformity_b_loss`（正向迁移的肤色内部一致性）
 - `gen_reference_skin_red_overshoot_b_loss`、`gen_reference_skin_local_red_tail_b_loss`
@@ -1325,6 +1439,13 @@ source/target 仍来自数据加载器给出的一对一样本，不会跨组重
 - `val_reference_affine_weight_rms`（双向生成器原 affine 输出头权重 RMS）
 - `val_reference_condition_saturation_fraction`（参考条件绝对值大于 `0.95` 的比例）
 - `val_reference_white_balance_loss`（生成图与两方向参考图的白平衡差异，越小越好）
+- `val_fake_target_environment_loss`、`val_source_target_environment_loss`
+  （正向生成环境误差与迁移前 source 基线）
+- `val_environment_ratio`（上述两者之比，小于 `1` 表示环境颜色得到改善）
+- `val_fake_target_environment_chroma_mean_loss`、
+  `val_fake_target_environment_luminance_mean_loss`
+- `val_fake_target_environment_scale_1_loss`、`scale_2_loss`、`scale_4_loss`
+- `val_fake_target_environment_valid_fraction`
 - `val_fake_target_skin_tone_loss`、`val_source_target_skin_tone_loss`
   （正向生成肤色误差与迁移前基线）
 - `--skin` 报告中的 `skin_ratio`（由上面两个聚合 loss 相除，小于 `1` 表示改善）
@@ -1362,7 +1483,7 @@ python scripts/report_reference_metrics.py
 
 脚本只读取 `metrics.csv`，不读取图片、文件名或数据路径，并输出一行可以直接
 复制的汇总结果。默认路径是
-`../experiment/custom_one_to_one_reference_color_v7_face_skin/logs/metrics.csv`；如果
+`../experiment/custom_one_to_one_reference_color_v8_environment/logs/metrics.csv`；如果
 实验目录不同，可以把实际 CSV 路径作为第一个参数：
 
 ```bash
@@ -1413,6 +1534,15 @@ python scripts/report_reference_metrics.py --skin
 
 它只读取 CSV，并输出肤色迁移前基线、迁移后误差、肤色 `R/G` 偏差、亮度比、
 红色过冲、局部红斑和 mask 有效比例。
+
+如果重点判断人物以外区域的环境颜色和色温，运行：
+
+```bash
+python scripts/report_reference_metrics.py --environment
+```
+
+它只输出环境迁移前基线、迁移后误差、两者比例、冷暖/色调、三个空间尺度和有效
+样本比例；不需要再复制完整 CSV。
 
 完整报告中的旧字段含义如下：
 

@@ -729,6 +729,218 @@ def test_white_balance_statistics_have_finite_gradients() -> None:
     assert torch.isfinite(prediction.grad).all()
 
 
+def _environment_pair(
+    source_background: tuple[float, float, float],
+    target_background: tuple[float, float, float],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    source = torch.tensor(source_background).view(1, 3, 1, 1)
+    source = source.expand(1, 3, 32, 32).clone()
+    target = torch.tensor(target_background).view(1, 3, 1, 1)
+    target = target.expand(1, 3, 32, 32).clone()
+    source_face = torch.zeros((1, 1, 32, 32))
+    target_face = torch.zeros((1, 1, 32, 32))
+    source_face[:, :, 8:20, 6:18] = 1
+    target_face[:, :, 10:22, 12:24] = 1
+    source[:, :, 8:20, 6:18] = torch.tensor(
+        [0.62, 0.41, 0.28]
+    ).view(1, 3, 1, 1)
+    target[:, :, 10:22, 12:24] = torch.tensor(
+        [0.72, 0.48, 0.35]
+    ).view(1, 3, 1, 1)
+    return source, target, source_face, target_face
+
+
+def test_environment_loss_matches_background_despite_face_misalignment() -> None:
+    source, target, source_face, target_face = _environment_pair(
+        (0.30, 0.34, 0.42),
+        (0.48, 0.40, 0.30),
+    )
+    prediction = target.clone()
+    prediction[:, :, 10:22, 12:24] = torch.tensor(
+        [0.48, 0.40, 0.30]
+    ).view(1, 3, 1, 1)
+    prediction[:, :, 8:20, 6:18] = torch.tensor(
+        [0.72, 0.48, 0.35]
+    ).view(1, 3, 1, 1)
+
+    terms = UnsupervisedPipeline._reference_environment_color_terms(
+        prediction,
+        source,
+        target,
+        input_face_mask=source_face,
+        reference_face_mask=target_face,
+        face_dilation=3,
+    )
+
+    assert terms["valid_fraction"].item() == pytest.approx(1.0)
+    assert terms["loss"].item() < 0.01
+    assert terms["warm_abs"].item() < 0.01
+    assert terms["tint_abs"].item() < 0.01
+
+
+def test_environment_loss_detects_source_colored_background() -> None:
+    source, target, source_face, target_face = _environment_pair(
+        (0.30, 0.34, 0.42),
+        (0.48, 0.40, 0.30),
+    )
+
+    source_terms = UnsupervisedPipeline._reference_environment_color_terms(
+        source,
+        source,
+        target,
+        input_face_mask=source_face,
+        reference_face_mask=target_face,
+        face_dilation=3,
+    )
+    matched_prediction = target.clone()
+    matched_prediction[:, :, 10:22, 12:24] = torch.tensor(
+        [0.48, 0.40, 0.30]
+    ).view(1, 3, 1, 1)
+    matched_prediction[:, :, 8:20, 6:18] = torch.tensor(
+        [0.72, 0.48, 0.35]
+    ).view(1, 3, 1, 1)
+    target_terms = UnsupervisedPipeline._reference_environment_color_terms(
+        matched_prediction,
+        source,
+        target,
+        input_face_mask=source_face,
+        reference_face_mask=target_face,
+        face_dilation=3,
+    )
+
+    assert source_terms["loss"].item() > target_terms["loss"].item() + 0.10
+    assert source_terms["warm_abs"].item() > 0.10
+
+
+def test_environment_loss_has_prediction_only_finite_gradients() -> None:
+    source, target, source_face, target_face = _environment_pair(
+        (0.30, 0.34, 0.42),
+        (0.48, 0.40, 0.30),
+    )
+    source.requires_grad_(True)
+    target.requires_grad_(True)
+    prediction = source.detach().clone().requires_grad_(True)
+
+    terms = UnsupervisedPipeline._reference_environment_color_terms(
+        prediction,
+        source,
+        target,
+        input_face_mask=source_face,
+        reference_face_mask=target_face,
+        face_dilation=3,
+    )
+    terms["loss"].backward()
+
+    assert prediction.grad is not None
+    assert torch.isfinite(prediction.grad).all()
+    assert prediction.grad.abs().sum().item() > 0
+    assert source.grad is None
+    assert target.grad is None
+
+
+def test_environment_pyramid_detects_spatial_color_swap() -> None:
+    reference = torch.empty((1, 3, 32, 32))
+    reference[:, :, :16] = torch.tensor(
+        [0.52, 0.39, 0.28]
+    ).view(1, 3, 1, 1)
+    reference[:, :, 16:] = torch.tensor(
+        [0.26, 0.35, 0.50]
+    ).view(1, 3, 1, 1)
+    prediction = reference.flip(-2)
+
+    terms = UnsupervisedPipeline._reference_environment_color_terms(
+        prediction,
+        reference,
+        reference,
+        face_dilation=0,
+    )
+
+    assert terms["scale_1_loss"].item() < 0.01
+    assert terms["scale_2_loss"].item() > 0.10
+    assert terms["scale_4_loss"].item() > 0.10
+
+
+def test_environment_loss_returns_differentiable_zero_without_background() -> None:
+    prediction = torch.zeros(
+        (1, 3, 16, 16),
+        requires_grad=True,
+    )
+    image = torch.zeros_like(prediction)
+    full_face = torch.ones((1, 1, 16, 16))
+
+    terms = UnsupervisedPipeline._reference_environment_color_terms(
+        prediction,
+        image,
+        image,
+        input_face_mask=full_face,
+        reference_face_mask=full_face,
+        face_dilation=3,
+    )
+    terms["loss"].backward()
+
+    assert terms["loss"].item() == 0
+    assert terms["valid_fraction"].item() == 0
+    assert prediction.grad is not None
+    assert torch.isfinite(prediction.grad).all()
+    assert prediction.grad.count_nonzero().item() == 0
+
+
+def test_invalid_environment_sample_does_not_dilute_valid_batch() -> None:
+    source, target, source_face, target_face = _environment_pair(
+        (0.30, 0.34, 0.42),
+        (0.48, 0.40, 0.30),
+    )
+    valid_terms = UnsupervisedPipeline._reference_environment_color_terms(
+        source,
+        source,
+        target,
+        input_face_mask=source_face,
+        reference_face_mask=target_face,
+        face_dilation=3,
+    )
+    empty = torch.zeros_like(source)
+    full_face = torch.ones_like(source_face)
+    batch_terms = UnsupervisedPipeline._reference_environment_color_terms(
+        torch.cat([source, empty]),
+        torch.cat([source, empty]),
+        torch.cat([target, empty]),
+        input_face_mask=torch.cat([source_face, full_face]),
+        reference_face_mask=torch.cat([target_face, full_face]),
+        face_dilation=3,
+    )
+
+    assert torch.allclose(batch_terms["loss"], valid_terms["loss"])
+    assert batch_terms["valid_fraction"].item() == pytest.approx(0.5)
+
+
+def test_environment_loss_ignores_both_face_masks_if_either_is_implausible() -> None:
+    source, target, source_face, target_face = _environment_pair(
+        (0.30, 0.34, 0.42),
+        (0.48, 0.40, 0.30),
+    )
+    target_face.fill_(1)
+
+    gated_terms = UnsupervisedPipeline._reference_environment_color_terms(
+        source,
+        source,
+        target,
+        input_face_mask=source_face,
+        reference_face_mask=target_face,
+        face_dilation=3,
+        face_min_fraction=0.01,
+        face_max_fraction=0.35,
+    )
+    unmasked_terms = UnsupervisedPipeline._reference_environment_color_terms(
+        source,
+        source,
+        target,
+        face_dilation=3,
+    )
+
+    assert torch.allclose(gated_terms["loss"], unmasked_terms["loss"])
+    assert gated_terms["valid_fraction"].item() == pytest.approx(1.0)
+
+
 def test_white_balance_weight_ramps_by_absolute_epoch() -> None:
     weights = [
         UnsupervisedPipeline._ramped_weight(3.0, 5, epoch)
