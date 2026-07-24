@@ -52,6 +52,36 @@ class PipelineSelector:
                     reference_white_balance_ramp_epochs=(
                         config.pipeline.params.reference_white_balance_ramp_epochs
                     ),
+                    reference_skin_tone_weight=(
+                        config.pipeline.params.reference_skin_tone_weight
+                    ),
+                    reference_skin_tone_ramp_epochs=(
+                        config.pipeline.params.reference_skin_tone_ramp_epochs
+                    ),
+                    reference_skin_std_weight=(
+                        config.pipeline.params.reference_skin_std_weight
+                    ),
+                    reference_skin_luminance_weight=(
+                        config.pipeline.params.reference_skin_luminance_weight
+                    ),
+                    reference_skin_uniformity_weight=(
+                        config.pipeline.params.reference_skin_uniformity_weight
+                    ),
+                    reference_skin_red_overshoot_weight=(
+                        config.pipeline.params.reference_skin_red_overshoot_weight
+                    ),
+                    reference_skin_local_red_weight=(
+                        config.pipeline.params.reference_skin_local_red_weight
+                    ),
+                    reference_skin_red_overshoot_margin=(
+                        config.pipeline.params.reference_skin_red_overshoot_margin
+                    ),
+                    reference_skin_min_fraction=(
+                        config.pipeline.params.reference_skin_min_fraction
+                    ),
+                    reference_skin_max_fraction=(
+                        config.pipeline.params.reference_skin_max_fraction
+                    ),
                     reference_local_chroma_weight=(
                         config.pipeline.params.reference_local_chroma_weight
                     ),

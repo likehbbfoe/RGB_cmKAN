@@ -98,6 +98,198 @@ def test_white_balance_statistics_prefer_neutral_pixels_over_saturated_color() -
     assert statistics.abs().max().item() < 0.10
 
 
+def test_soft_skin_mask_classifies_synthetic_colors() -> None:
+    colors = torch.tensor(
+        [
+            [0.62, 0.41, 0.28],
+            [0.25, 0.16, 0.10],
+            [0.90, 0.72, 0.62],
+            [0.50, 0.50, 0.50],
+            [0.20, 0.30, 0.70],
+            [0.80, 0.10, 0.10],
+        ],
+    ).reshape(6, 3, 1, 1)
+
+    mask = UnsupervisedPipeline._soft_skin_mask(colors)
+    values = mask[:, 0, 0, 0]
+
+    assert mask.shape == (6, 1, 1, 1)
+    assert torch.isfinite(mask).all()
+    assert ((0 <= mask) & (mask <= 1)).all()
+    assert values[0].item() > 0.8
+    assert values[1].item() > 0.5
+    assert values[2].item() > 0.8
+    assert values[3].item() < 0.01
+    assert values[4].item() < 1e-3
+    assert values[5].item() < 1e-3
+
+
+def _skin_patch_image(
+    background: tuple[float, float, float],
+    skin: tuple[float, float, float],
+    patch: tuple[slice, slice],
+) -> torch.Tensor:
+    image = torch.tensor(background).view(1, 3, 1, 1)
+    image = image.expand(1, 3, 24, 24).clone()
+    image[:, :, patch[0], patch[1]] = torch.tensor(skin).view(1, 3, 1, 1)
+    return image
+
+
+def test_skin_loss_ignores_background_and_does_not_require_pixel_alignment() -> None:
+    source = _skin_patch_image(
+        (0.20, 0.30, 0.70),
+        (0.62, 0.41, 0.28),
+        (slice(4, 12), slice(4, 12)),
+    )
+    target = _skin_patch_image(
+        (0.80, 0.10, 0.10),
+        (0.72, 0.48, 0.35),
+        (slice(12, 20), slice(12, 20)),
+    )
+    prediction = _skin_patch_image(
+        (0.10, 0.70, 0.15),
+        (0.72, 0.48, 0.35),
+        (slice(4, 12), slice(4, 12)),
+    )
+
+    matched = UnsupervisedPipeline._reference_skin_tone_terms(
+        prediction,
+        source,
+        target,
+    )
+    red_prediction = prediction.clone()
+    red_prediction[:, :, 4:12, 4:12] = torch.tensor(
+        [0.90, 0.25, 0.18],
+    ).view(1, 3, 1, 1)
+    red = UnsupervisedPipeline._reference_skin_tone_terms(
+        red_prediction,
+        source,
+        target,
+    )
+
+    assert matched['valid_fraction'].item() == 1
+    assert matched['tone_loss'].item() < 0.01
+    assert red['chroma_loss'].item() > matched['chroma_loss'].item() + 0.10
+    assert red['red_overshoot'].item() > 0.10
+
+
+def test_skin_loss_uses_source_mask_even_when_prediction_turns_blue() -> None:
+    source = _skin_patch_image(
+        (0.20, 0.30, 0.70),
+        (0.62, 0.41, 0.28),
+        (slice(4, 20), slice(4, 20)),
+    )
+    target = source.clone()
+    prediction = source.clone()
+    prediction[:, :, 4:20, 4:20] = torch.tensor(
+        [0.15, 0.25, 0.75],
+    ).view(1, 3, 1, 1)
+
+    terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        prediction,
+        source,
+        target,
+    )
+
+    assert terms['valid_fraction'].item() == 1
+    assert terms['chroma_loss'].item() > 0.5
+
+
+def test_skin_loss_has_finite_gradients_and_detaches_real_images() -> None:
+    source = _skin_patch_image(
+        (0.20, 0.30, 0.70),
+        (0.62, 0.41, 0.28),
+        (slice(4, 20), slice(4, 20)),
+    ).requires_grad_(True)
+    target = _skin_patch_image(
+        (0.15, 0.65, 0.20),
+        (0.68, 0.46, 0.34),
+        (slice(4, 20), slice(4, 20)),
+    ).requires_grad_(True)
+    prediction = source.detach().clone()
+    prediction[:, 0, 4:20, 4:20] = 0.85
+    prediction.requires_grad_(True)
+
+    terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        prediction,
+        source,
+        target,
+    )
+    terms['loss'].backward()
+
+    assert prediction.grad is not None
+    assert torch.isfinite(prediction.grad).all()
+    assert prediction.grad[:, :, 4:20, 4:20].abs().sum().item() > 0
+    assert source.grad is None
+    assert target.grad is None
+
+
+def test_empty_skin_masks_return_differentiable_zero() -> None:
+    source = torch.tensor([0.20, 0.30, 0.70]).view(1, 3, 1, 1)
+    source = source.expand(1, 3, 16, 16)
+    target = torch.full((1, 3, 16, 16), 0.5)
+    prediction = source.clone().requires_grad_(True)
+
+    terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        prediction,
+        source,
+        target,
+    )
+    terms['loss'].backward()
+
+    assert terms['valid_fraction'].item() == 0
+    assert terms['loss'].item() == 0
+    assert prediction.grad is not None
+    assert prediction.grad.count_nonzero().item() == 0
+
+
+def test_excessive_skin_coverage_is_rejected_as_background_contamination() -> None:
+    source = torch.tensor([0.62, 0.41, 0.28]).view(1, 3, 1, 1)
+    source = source.expand(1, 3, 16, 16)
+    target = torch.tensor([0.70, 0.46, 0.32]).view(1, 3, 1, 1)
+    target = target.expand(1, 3, 16, 16)
+
+    terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        source,
+        source,
+        target,
+        max_fraction=0.5,
+    )
+
+    assert terms['input_fraction'].item() > 0.5
+    assert terms['reference_fraction'].item() > 0.5
+    assert terms['valid_fraction'].item() == 0
+    assert terms['loss'].item() == 0
+
+
+def test_invalid_skin_samples_do_not_dilute_valid_batch() -> None:
+    valid_source = _skin_patch_image(
+        (0.20, 0.30, 0.70),
+        (0.62, 0.41, 0.28),
+        (slice(4, 20), slice(4, 20)),
+    )
+    valid_target = _skin_patch_image(
+        (0.20, 0.30, 0.70),
+        (0.70, 0.46, 0.32),
+        (slice(4, 20), slice(4, 20)),
+    )
+    valid_prediction = valid_source.clone()
+    empty = torch.full_like(valid_source, 0.5)
+    batch_terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        torch.cat([valid_prediction, empty]),
+        torch.cat([valid_source, empty]),
+        torch.cat([valid_target, empty]),
+    )
+    valid_terms = UnsupervisedPipeline._reference_skin_tone_terms(
+        valid_prediction,
+        valid_source,
+        valid_target,
+    )
+
+    assert batch_terms['valid_fraction'].item() == 0.5
+    assert torch.allclose(batch_terms['loss'], valid_terms['loss'])
+
+
 def test_local_chroma_loss_allows_global_channel_gains() -> None:
     generator = torch.Generator().manual_seed(11)
     source_linear = torch.rand((2, 3, 16, 16), generator=generator) * 0.35 + 0.15
@@ -223,6 +415,21 @@ def test_local_chroma_tail_terms_have_finite_prediction_gradients() -> None:
 
     assert prediction.grad is not None
     assert torch.isfinite(prediction.grad).all()
+
+
+def test_local_chroma_terms_accept_zero_spatial_weights() -> None:
+    source = torch.full((1, 3, 16, 16), 0.5)
+    prediction = source.clone()
+    prediction[:, 0, 4:12, 4:12] = 0.9
+
+    terms = UnsupervisedPipeline._local_chroma_terms(
+        prediction,
+        source,
+        spatial_weights=torch.zeros((1, 1, 16, 16)),
+    )
+
+    assert all(torch.isfinite(value) for value in terms.values())
+    assert all(value.item() == 0 for value in terms.values())
 
 
 def test_range_tail_exposes_sparse_values_that_would_be_clipped() -> None:

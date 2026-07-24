@@ -14,7 +14,7 @@ from typing import Iterable, Mapping
 DEFAULT_METRICS_PATH = Path(
     os.environ.get(
         "CMKAN_METRICS_PATH",
-        "experiments/custom_one_to_one_reference_color_v4_conditioned/logs/metrics.csv",
+        "experiments/custom_one_to_one_reference_color_v5_skin/logs/metrics.csv",
     )
 )
 
@@ -44,6 +44,29 @@ RED_OUTPUT_METRICS = (
     ("red_tail", "val_fake_target_local_red_tail"),
     ("red_bad", "val_fake_target_local_red_bad_fraction"),
     ("red_overshoot", "val_fake_target_red_overshoot_loss"),
+)
+
+SKIN_OUTPUT_METRICS = (
+    ("ratio", "val_reference_style_ratio"),
+    ("move", "val_source_fake_l1"),
+    ("response", "val_reference_response_l1"),
+    ("skin_ratio", "val_fake_target_skin_tone_ratio"),
+    ("skin_loss", "val_fake_target_skin_tone_loss"),
+    ("skin_base", "val_source_target_skin_tone_loss"),
+    ("skin_rg", "val_fake_target_skin_red_green_delta"),
+    ("skin_bg", "val_fake_target_skin_blue_green_delta"),
+    ("skin_warm", "val_fake_target_skin_warm_delta"),
+    ("skin_tint", "val_fake_target_skin_tint_delta"),
+    ("skin_luma", "val_fake_target_skin_luminance_ratio"),
+    ("skin_red", "val_fake_target_skin_red_overshoot"),
+    ("skin_red_tail", "val_fake_target_skin_local_red_tail"),
+    (
+        "skin_red_bad",
+        "val_fake_target_skin_local_red_bad_fraction",
+    ),
+    ("skin_valid", "val_fake_target_skin_valid_fraction"),
+    ("source_skin", "val_source_skin_fraction"),
+    ("target_skin", "val_target_skin_fraction"),
 )
 
 LEGACY_OUTPUT_METRICS = (
@@ -92,7 +115,54 @@ SAFETY_OUTPUT_METRICS = (
     ("out_of_range", "val_fake_target_out_of_range_fraction"),
 )
 
-ALL_OUTPUT_METRICS = LEGACY_OUTPUT_METRICS + SAFETY_OUTPUT_METRICS
+SKIN_SAFETY_OUTPUT_METRICS = (
+    ("skin_objective", "val_fake_target_skin_loss"),
+    ("skin_loss", "val_fake_target_skin_tone_loss"),
+    ("skin_base", "val_source_target_skin_tone_loss"),
+    ("skin_ratio", "val_fake_target_skin_tone_ratio"),
+    ("skin_chroma", "val_fake_target_skin_chroma_loss"),
+    ("skin_spread", "val_fake_target_skin_spread_loss"),
+    ("skin_luminance", "val_fake_target_skin_luminance_loss"),
+    ("skin_uniformity", "val_fake_target_skin_uniformity_loss"),
+    ("skin_rg", "val_fake_target_skin_red_green_delta"),
+    ("skin_bg", "val_fake_target_skin_blue_green_delta"),
+    ("skin_warm", "val_fake_target_skin_warm_delta"),
+    ("skin_tint", "val_fake_target_skin_tint_delta"),
+    ("skin_luma", "val_fake_target_skin_luminance_ratio"),
+    ("skin_red", "val_fake_target_skin_red_overshoot"),
+    ("skin_red_tail", "val_fake_target_skin_local_red_tail"),
+    (
+        "skin_red_bad",
+        "val_fake_target_skin_local_red_bad_fraction",
+    ),
+    ("skin_valid", "val_fake_target_skin_valid_fraction"),
+    ("source_skin", "val_source_skin_fraction"),
+    ("target_skin", "val_target_skin_fraction"),
+)
+
+ALL_OUTPUT_METRICS = (
+    LEGACY_OUTPUT_METRICS
+    + SAFETY_OUTPUT_METRICS
+    + SKIN_SAFETY_OUTPUT_METRICS
+)
+
+VALID_GATED_SKIN_METRICS = (
+    "skin_objective",
+    "skin_loss",
+    "skin_base",
+    "skin_chroma",
+    "skin_spread",
+    "skin_luminance",
+    "skin_uniformity",
+    "skin_rg",
+    "skin_bg",
+    "skin_warm",
+    "skin_tint",
+    "skin_luma",
+    "skin_red",
+    "skin_red_tail",
+    "skin_red_bad",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -124,6 +194,13 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Print only the metrics needed to diagnose global and local "
             "red color casts"
+        ),
+    )
+    output_group.add_argument(
+        "--skin",
+        action="store_true",
+        help=(
+            "Print the target-relative skin-tone and local-red diagnostics"
         ),
     )
     return parser.parse_args()
@@ -185,6 +262,31 @@ def summarize_metrics(path: Path) -> tuple[int, dict[str, float | None]]:
         output_name: _mean_for_epoch(rows, latest_epoch, csv_name)
         for output_name, csv_name in ALL_OUTPUT_METRICS
     }
+    # The supplied v5 config validates one image per batch. Invalid mask pairs
+    # contribute zero to gated Lightning metrics, so undo that dilution before
+    # reporting the valid-sample mean. Derive skin_ratio from the two corrected
+    # aggregate losses instead of averaging per-image ratios.
+    valid_fraction = summary.get("skin_valid")
+    if valid_fraction is not None:
+        if valid_fraction > 1e-12:
+            for metric_name in VALID_GATED_SKIN_METRICS:
+                value = summary.get(metric_name)
+                if value is not None:
+                    summary[metric_name] = value / valid_fraction
+        else:
+            for metric_name in VALID_GATED_SKIN_METRICS:
+                summary[metric_name] = None
+    skin_loss = summary.get("skin_loss")
+    skin_base = summary.get("skin_base")
+    summary["skin_ratio"] = (
+        skin_loss / skin_base
+        if (
+            skin_loss is not None
+            and skin_base is not None
+            and skin_base > 1e-12
+        )
+        else None
+    )
     return latest_epoch, summary
 
 
@@ -214,6 +316,8 @@ def main() -> None:
         output_metrics = ALL_OUTPUT_METRICS
     elif args.red:
         output_metrics = RED_OUTPUT_METRICS
+    elif args.skin:
+        output_metrics = SKIN_OUTPUT_METRICS
     else:
         output_metrics = COMPACT_OUTPUT_METRICS
     print(format_summary(epoch, summary, output_metrics))

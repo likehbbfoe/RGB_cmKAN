@@ -145,17 +145,22 @@ relative-filename correspondence is used when available; otherwise each matching
 scene directory is naturally sorted and zipped. Counts must match globally and in
 every scene directory, so a target can never be silently reused.
 
-Reference-guided checkpoints contain additional conditioning layers and must be
-trained from scratch:
+Reference-guided checkpoints contain additional conditioning layers. For the
+current skin-aware run, preview the private masks and then train from scratch:
 
 ```bash
+python scripts/preview_skin_masks.py
+
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=7 \
-./scripts/train_custom_unpaired_reference_v4.sh
+./scripts/train_custom_unpaired_reference_v5_skin.sh
 ```
 
+The launcher stops early with an installation hint if it detects the known
+Lightning 2.1.x and Rich 14+ progress-bar incompatibility.
+
 The server config starts a separate experiment named
-`custom_one_to_one_reference_color_v4_conditioned`, so existing v1/v2/v3/v6
-checkpoints and CSV logs are left untouched. v4 addresses a measured
+`custom_one_to_one_reference_color_v5_skin`, so existing v1/v2/v3/v4/v6
+checkpoints and CSV logs are left untouched. v4 addressed a measured
 `ratio=0.9972` with `luma_ratio=1.03`: exposure was stable, but the output was
 almost identical to the source and the reference branch was effectively
 ignored. It scales the style delta by 10, applies a smooth `tanh` bound, and
@@ -165,30 +170,42 @@ Both conditional output heads start at zero, so the zero-update output remains
 the source image while useful condition gradients are available on the first
 update.
 
-The v4 stability configuration trains for 200 epochs. It keeps the v3 bounded
+v5 keeps that conditioning path, restores the safe global style weight to `3`,
+and adds a non-aligned skin-tone objective. The generated image is measured
+through a mask computed from the real source; reference statistics use a
+separate mask from the real target. Linear-RGB log-chroma moments and a small
+luminance term are compared without matching pixels or copying facial
+structure. Skin-local uniformity and target-relative red guards protect against
+red patches and uniformly over-red faces.
+
+The v5 stability configuration trains for 200 epochs. It keeps the bounded
 output and local color safeguards, uses five epochs of the complete
 non-adversarial generator objective, then ramps the adversarial weight from
-`0.1` at epoch 5 to `1.0` at epoch 14. Keep `resume: false`: a v3 checkpoint can
-still be loaded with the v3/default model structure, but it cannot be resumed
-as v4 because v4 has new parameters and optimizer state.
+`0.1` at epoch 5 to `1.0` at epoch 14. Keep `resume: false`. Do not resume the
+finished style-15 red checkpoint: its optimizer schedule is already decayed and
+its learned color bias would be retained.
 
 Before training updates, the callback saves
-`experiments/custom_one_to_one_reference_color_v4_conditioned/logs/figures/initial_source_to_target_0.png`;
+`experiments/custom_one_to_one_reference_color_v5_skin/logs/figures/initial_source_to_target_0.png`;
 it should look like the source because the bounded residual head starts from
 identity. The sibling `source_to_target_0.png` is saved after the first complete
 warm-up epoch. Reference-guided best checkpoints monitor
 `val_reference_selection_loss`, which excludes the changing discriminator
-score. Run `python scripts/report_reference_metrics.py` for the compact
+score and includes the target-relative skin objective. Run
+`python scripts/report_reference_metrics.py --skin` for the skin report, or
+`python scripts/report_reference_metrics.py` for the compact
 `ratio/move/response/direct/luma_ratio/red_bad` report. During epochs 1–5,
-`response` and `direct` should leave zero and `ratio` should begin falling below
-`0.99`; otherwise stop early and inspect the full report. The v2 and v3 configs
-and launchers remain available for exact rollback.
+`response` and `direct` should leave zero and `skin_valid` must be non-zero.
+The color mask is heuristic, so inspect `skin_mask_preview.png`: white regions
+should cover skin instead of wood, yellow walls, or clothing. The v2/v3/v4
+configs and launchers remain available for exact rollback. Samples below 0.5%
+or above 50% candidate coverage are excluded from the skin objective.
 
 Use one target image as the reference for one source image or a source folder:
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v4.server.yaml \
+  --config configs/custom_unpaired_reference_v5_skin.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /absolute/path/to/source_images \
   --reference /absolute/path/to/target_reference.jpg \
@@ -200,7 +217,7 @@ The reference contributes global linear-RGB, CIE chromaticity, luminance, and
 contrast statistics; it does not copy the reference scene or subject. See the
 [Chinese custom unpaired guide](docs/custom_unpaired_training_zh.md#-参考图引导模式当前数据推荐)
 for the training loss, configuration rationale, and a same-source/different-reference
-comparison procedure. Prediction must use the same v4 YAML as training because
+comparison procedure. Prediction must use the same v5 YAML as training because
 the architecture and bounded-output parameters are selected by configuration.
 
 

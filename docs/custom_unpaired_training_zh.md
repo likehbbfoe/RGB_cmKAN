@@ -627,13 +627,144 @@ cm_kan/ml/models/cycle_cm_kan.py
 cm_kan/ml/pipelines/unsupervised.py
 ```
 
+### v5：肤色定向迁移与局部红斑保护
+
+style 权重改到 `15` 后虽然 `ratio` 降到约 `0.40`，但人脸更红，说明整图风格距离
+可以通过整体偏色快速下降，却没有回答“脸是否接近对应 target”。现有整图
+`red_bad` 还会先扣除全局颜色变化，因此整张脸均匀偏红时可能仍接近 `0`。
+
+v5 不下载人脸模型，也不比较五官像素。它在真实 source 和真实 target 上分别用
+YCbCr、亮度、饱和度生成软候选肤色区域，然后：
+
+```text
+fake target 的统计区域 = source 的候选肤色 mask
+目标统计区域            = target 的候选肤色 mask
+```
+
+两个 mask、真实图统计和有效性判断都不参与反向传播；fake 不能用自己的颜色重新生成
+mask，因此不能把脸改成蓝色来逃避 loss。比较的是每张图候选肤色区域的 linear-RGB
+`log(R/G)`、`log(B/G)` 均值/标准差和一个小权重亮度项，不比较空间对应像素，所以
+source 与 target 只需一一对应、主题和人物接近，不要求严格像素对齐，也不会复制
+target 的五官或纹理。
+
+另外有两层保护：
+
+- 允许整块肤色相对背景发生统一迁色，但惩罚脸内不一致的颜色变化和局部红斑；
+- 若 fake 肤色的 `log(R/G)` 比对应 target 还高出 margin，则单边惩罚红色过冲。
+
+v5 使用独立实验，保留所有旧模型：
+
+```text
+configs/custom_unpaired_reference_v5_skin.server.yaml
+scripts/train_custom_unpaired_reference_v5_skin.sh
+experiments/custom_one_to_one_reference_color_v5_skin/
+```
+
+关键配置为：
+
+```yaml
+resume: false
+pipeline:
+  params:
+    batch_size: 8
+    reference_style_weight: 3.0
+    reference_skin_tone_weight: 2.0
+    reference_skin_tone_ramp_epochs: 10
+    reference_skin_std_weight: 0.25
+    reference_skin_luminance_weight: 0.15
+    reference_skin_uniformity_weight: 0.25
+    reference_skin_red_overshoot_weight: 0.5
+    reference_skin_local_red_weight: 0.5
+    reference_skin_red_overshoot_margin: 0.03
+    reference_skin_min_fraction: 0.005
+    reference_skin_max_fraction: 0.5
+```
+
+先在服务器本地生成六组 mask 预览：
+
+```bash
+python scripts/preview_skin_masks.py
+```
+
+结果只保存在服务器：
+
+```text
+experiments/custom_one_to_one_reference_color_v5_skin/logs/figures/skin_mask_preview.png
+```
+
+每行依次是 `source | source mask | target | target mask`。白色应主要覆盖脸、手等肤色
+区域；每个 mask 左上角会显示覆盖率和 `ok/skip`。若大面积木墙、黄墙或衣服变白，
+就不要直接开始训练。这个 mask 是透明的颜色
+启发式，不是人脸分割器，无法从颜色上保证区分皮肤和木材。
+
+确认预览后从零启动：
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=7 \
+./scripts/train_custom_unpaired_reference_v5_skin.sh
+```
+
+启动脚本会先检查你之前遇到的版本组合。若服务器仍是
+`Lightning 2.1.x + Rich 15`，它会在进入 `model.fit()` 前给出明确错误；先执行：
+
+```bash
+python -m pip install --force-reinstall "rich==13.9.4"
+```
+
+不要续训已经完成的 style-15 红色 checkpoint。200 轮后的学习率调度器已接近零，
+而且旧的红色偏置会保留；v5 默认 `resume: false`，使用新目录和全新的优化器。
+
+训练完成一次验证后，用一行报告肤色指标：
+
+```bash
+python scripts/report_reference_metrics.py --skin
+```
+
+重点看：
+
+- `skin_valid`：验证样本中 source/target 两边的候选肤色占比同时落在
+  `0.5%～50%` 的比例；必须明显大于 `0`，否则肤色 loss 实际没有生效；
+- `source_skin`、`target_skin`：候选肤色像素占比；异常高通常说明背景被误选；
+- `skin_ratio = skin_loss / skin_base`：小于 `1` 表示 fake 肤色比原 source 更靠近
+  target，不能再只看整图 `ratio`；
+- `skin_rg`：fake 相对 target 的肤色 `log(R/G)`；正值表示肤色更红；
+- `skin_red`、`skin_red_tail`、`skin_red_bad`：整块肤色红色过冲、最坏局部红斑和
+  局部异常比例，越接近 `0` 越好；
+- `skin_luma`：fake/target 的肤色亮度比，接近 `1` 最好。
+
+默认 `val_batch_size: 1` 下，无效 mask 样本在 Lightning 原始 CSV 中对应值为 `0`。
+`--skin` 报告会先用 `skin_valid` 恢复仅有效样本的均值，并用聚合后的
+`skin_loss / skin_base` 重新计算 `skin_ratio`，不会把无效样本误报成已经改善。
+
+v5 的最佳 checkpoint 仍监控 `val_reference_selection_loss`，但该分数已加入肤色目标，
+并降低整图 style distance 的支配程度，避免自动 best 再偏向靠整图染色降低
+`ratio` 的模型。
+
+服务器不能拉取时，最省事是覆盖整个 `cm_kan/` 文件夹，并复制：
+
+```text
+configs/custom_unpaired_reference_v5_skin.server.yaml
+scripts/train_custom_unpaired_reference_v5_skin.sh
+scripts/preview_skin_masks.py
+scripts/report_reference_metrics.py
+```
+
+若只能逐文件传输代码，至少还要覆盖：
+
+```text
+cm_kan/core/config/pipeline.py
+cm_kan/core/selector/pipeline.py
+cm_kan/ml/pipelines/unsupervised.py
+```
+
 ### 用一张参考图推理
 
 下面会把同一张参考图广播给输入目录中的所有 source 图片：
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v4.server.yaml \
+  --config configs/custom_unpaired_reference_v5_skin.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /absolute/path/to/source_images \
   --reference /absolute/path/to/target_reference.jpg \
@@ -641,8 +772,8 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --batch_size 1
 ```
 
-推理必须使用训练这个 checkpoint 时的同一份 YAML。v4 checkpoint 必须搭配 v4
-YAML，不能换成 v2/v3 配置。`reference_direct_conditioning`、`output_mode` 与
+推理必须使用训练这个 checkpoint 时的同一份 YAML。v5 checkpoint 应搭配 v5
+YAML，旧 v4 checkpoint 仍搭配 v4 YAML。`reference_direct_conditioning`、`output_mode` 与
 `max_logit_shift` 都是配置行为；配置不一致会改变模型结构、输出范围或颜色变化幅度。
 
 参考图片可以与 source 内容完全不同，建议选择曝光正常、白平衡和肤色风格明确、
@@ -655,12 +786,12 @@ YAML，不能换成 v2/v3 配置。`reference_direct_conditioning`、`output_mod
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 \
-CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v4.server.yaml \
+CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v5_skin.server.yaml \
 ./scripts/predict_reference_guided.sh /absolute/path/to/target_reference.jpg
 ```
 
 该推理封装脚本为了兼容旧 checkpoint，默认仍指向 v2 配置；使用 v3 checkpoint 时
-必须显式传 v3 YAML，使用 v4 checkpoint 时则必须像上面一样显式传 v4 YAML；也可以
+必须显式传 v3 YAML，使用 v4/v5 checkpoint 时也必须显式传对应 YAML；也可以
 直接使用前面的完整 `main.py predict` 命令。
 
 ### 同一 source 更换参考图的对照检验
@@ -670,7 +801,7 @@ CMKAN_CONFIG_PATH=configs/custom_unpaired_reference_v4.server.yaml \
 
 ```bash
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v4.server.yaml \
+  --config configs/custom_unpaired_reference_v5_skin.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/warm_target.jpg \
@@ -678,7 +809,7 @@ CUDA_VISIBLE_DEVICES=7 python main.py predict \
   --batch_size 1
 
 CUDA_VISIBLE_DEVICES=7 python main.py predict \
-  --config configs/custom_unpaired_reference_v4.server.yaml \
+  --config configs/custom_unpaired_reference_v5_skin.server.yaml \
   --weights logs/checkpoints/last.ckpt \
   --input /tmp/cmkan_one_source \
   --reference /absolute/path/to/cool_target.jpg \
@@ -850,6 +981,10 @@ source/target 仍来自数据加载器给出的一对一样本，不会跨组重
 - `gen_patch_nce_a_loss`、`gen_patch_nce_b_loss`
 - `gen_reference_style_a_loss`、`gen_reference_style_b_loss`（参考图模式）
 - `gen_reference_white_balance_a_loss`、`gen_reference_white_balance_b_loss`（白平衡监督）
+- `gen_reference_skin_tone_a_loss`、`gen_reference_skin_tone_b_loss`（v5 候选肤色监督）
+- `gen_reference_skin_uniformity_b_loss`（正向迁移的肤色内部一致性）
+- `gen_reference_skin_red_overshoot_b_loss`、`gen_reference_skin_local_red_tail_b_loss`
+  （正向肤色整体红色过冲与局部红斑）
 - `gen_reference_local_chroma_a_loss`、`gen_reference_local_chroma_b_loss`（局部色度保护）
 - `fake_a_luminance`、`fake_b_luminance`
 - `real_a_luminance`、`real_b_luminance`
@@ -870,6 +1005,13 @@ source/target 仍来自数据加载器给出的一对一样本，不会跨组重
 - `val_reference_affine_weight_rms`（双向生成器原 affine 输出头权重 RMS）
 - `val_reference_condition_saturation_fraction`（参考条件绝对值大于 `0.95` 的比例）
 - `val_reference_white_balance_loss`（生成图与两方向参考图的白平衡差异，越小越好）
+- `val_fake_target_skin_tone_loss`、`val_source_target_skin_tone_loss`
+  （正向生成肤色误差与迁移前基线）
+- `--skin` 报告中的 `skin_ratio`（由上面两个聚合 loss 相除，小于 `1` 表示改善）
+- `val_fake_target_skin_red_green_delta`、`val_fake_target_skin_blue_green_delta`
+- `val_fake_target_skin_red_overshoot`、`val_fake_target_skin_local_red_tail`
+- `val_fake_target_skin_local_red_bad_fraction`
+- `val_fake_target_skin_valid_fraction`、`val_source_skin_fraction`、`val_target_skin_fraction`
 - `val_reference_local_chroma_loss`（扣除全局通道增益后的局部色度变化，越小越稳定）
 - `val_fake_target_local_chroma_mean`、`val_fake_target_local_chroma_tail`
   （正向迁移的局部色度平均值与最坏区域值）
@@ -900,7 +1042,7 @@ python scripts/report_reference_metrics.py
 
 脚本只读取 `metrics.csv`，不读取图片、文件名或数据路径，并输出一行可以直接
 复制的汇总结果。默认路径是
-`experiments/custom_one_to_one_reference_color_v4_conditioned/logs/metrics.csv`；如果
+`experiments/custom_one_to_one_reference_color_v5_skin/logs/metrics.csv`；如果
 实验目录不同，可以把实际 CSV 路径作为第一个参数：
 
 ```bash
@@ -942,6 +1084,15 @@ python scripts/report_reference_metrics.py --red
 
 它会输出一行全局红绿/蓝绿偏差、冷暖与绿—洋红偏差、source 到 target 的基线、
 局部红斑和相对 target 的红通道过冲。该模式同样只读取 CSV，不读取任何图片或文件名。
+
+如果重点判断人脸肤色是否向 target 迁移，运行：
+
+```bash
+python scripts/report_reference_metrics.py --skin
+```
+
+它只读取 CSV，并输出肤色迁移前基线、迁移后误差、肤色 `R/G` 偏差、亮度比、
+红色过冲、局部红斑和 mask 有效比例。
 
 完整报告中的旧字段含义如下：
 

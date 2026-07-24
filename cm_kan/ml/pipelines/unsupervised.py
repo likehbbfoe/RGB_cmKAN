@@ -41,6 +41,16 @@ class UnsupervisedPipeline(L.LightningModule):
         reference_style_weight: float = 0.0,
         reference_white_balance_weight: float = 0.0,
         reference_white_balance_ramp_epochs: int = 0,
+        reference_skin_tone_weight: float = 0.0,
+        reference_skin_tone_ramp_epochs: int = 0,
+        reference_skin_std_weight: float = 0.25,
+        reference_skin_luminance_weight: float = 0.15,
+        reference_skin_uniformity_weight: float = 0.25,
+        reference_skin_red_overshoot_weight: float = 0.5,
+        reference_skin_local_red_weight: float = 0.5,
+        reference_skin_red_overshoot_margin: float = 0.03,
+        reference_skin_min_fraction: float = 0.005,
+        reference_skin_max_fraction: float = 0.5,
         reference_local_chroma_weight: float = 0.0,
         reference_local_chroma_tail_weight: float = 0.0,
         reference_local_chroma_tail_fraction: float = 0.05,
@@ -78,6 +88,28 @@ class UnsupervisedPipeline(L.LightningModule):
         self.reference_white_balance_ramp_epochs = (
             reference_white_balance_ramp_epochs
         )
+        self.reference_skin_tone_weight = reference_skin_tone_weight
+        self.reference_skin_tone_ramp_epochs = (
+            reference_skin_tone_ramp_epochs
+        )
+        self.reference_skin_std_weight = reference_skin_std_weight
+        self.reference_skin_luminance_weight = (
+            reference_skin_luminance_weight
+        )
+        self.reference_skin_uniformity_weight = (
+            reference_skin_uniformity_weight
+        )
+        self.reference_skin_red_overshoot_weight = (
+            reference_skin_red_overshoot_weight
+        )
+        self.reference_skin_local_red_weight = (
+            reference_skin_local_red_weight
+        )
+        self.reference_skin_red_overshoot_margin = (
+            reference_skin_red_overshoot_margin
+        )
+        self.reference_skin_min_fraction = reference_skin_min_fraction
+        self.reference_skin_max_fraction = reference_skin_max_fraction
         self.reference_local_chroma_weight = reference_local_chroma_weight
         self.reference_local_chroma_tail_weight = (
             reference_local_chroma_tail_weight
@@ -329,6 +361,335 @@ class UnsupervisedPipeline(L.LightningModule):
         )
 
     @staticmethod
+    def _soft_skin_mask(images):
+        """Return a detached soft mask for skin-colored pixels in real images.
+
+        This is intentionally a transparent color heuristic rather than a face
+        detector. The mask must only be computed from real source/reference
+        images; using a generated image would let the generator evade the loss
+        by changing which pixels are selected.
+        """
+        srgb = images.float().clamp(0, 1)
+        red, green, blue = srgb.unbind(dim=1)
+        luminance = 0.299 * red + 0.587 * green + 0.114 * blue
+        cb = 0.5 - 0.168736 * red - 0.331264 * green + 0.5 * blue
+        cr = 0.5 + 0.5 * red - 0.418688 * green - 0.081312 * blue
+        channel_max = srgb.amax(dim=1)
+        channel_min = srgb.amin(dim=1)
+        saturation = (
+            (channel_max - channel_min) / channel_max.clamp_min(1e-3)
+        )
+
+        def soft_interval(values, lower, upper, softness):
+            return (
+                torch.sigmoid((values - lower) / softness)
+                * torch.sigmoid((upper - values) / softness)
+            )
+
+        raw_mask = (
+            soft_interval(luminance, 0.06, 0.95, 0.03)
+            * soft_interval(cb, 0.30, 0.52, 0.02)
+            * soft_interval(cr, 0.52, 0.70, 0.02)
+            * torch.sigmoid((red - green + 0.02) / 0.03)
+            * torch.sigmoid((0.78 - saturation) / 0.06)
+        ).unsqueeze(1)
+        mask = raw_mask * torch.sigmoid((raw_mask - 0.35) / 0.05)
+        return mask.detach()
+
+    @classmethod
+    def _weighted_skin_statistics(cls, images, mask, eps=1e-3):
+        """Compute per-image linear-RGB skin chroma and luminance moments."""
+        linear_rgb = cls._linearize_srgb(images.float())
+        red, green, blue = linear_rgb.unbind(dim=1)
+        log_chroma = torch.stack(
+            [
+                torch.log(red + eps) - torch.log(green + eps),
+                torch.log(blue + eps) - torch.log(green + eps),
+            ],
+            dim=1,
+        )
+        log_luminance = torch.log(
+            cls._luminance(linear_rgb).clamp_min(eps)
+        ).unsqueeze(1)
+        detached_mask = mask.detach()
+        reduce_dims = (2, 3)
+        weight_sum = detached_mask.sum(
+            dim=reduce_dims,
+            keepdim=True,
+        ).clamp_min(1e-6)
+
+        def moments(values):
+            mean = (
+                (detached_mask * values).sum(
+                    dim=reduce_dims,
+                    keepdim=True,
+                )
+                / weight_sum
+            )
+            variance = (
+                detached_mask * (values - mean).square()
+            ).sum(dim=reduce_dims, keepdim=True) / weight_sum
+            return (
+                mean.squeeze(-1).squeeze(-1),
+                variance.clamp_min(1e-8).sqrt().squeeze(-1).squeeze(-1),
+            )
+
+        chroma_mean, chroma_std = moments(log_chroma)
+        luminance_mean, luminance_std = moments(log_luminance)
+        return {
+            'chroma_map': log_chroma,
+            'chroma_mean': chroma_mean,
+            'chroma_std': chroma_std,
+            'luminance_mean': luminance_mean.squeeze(1),
+            'luminance_std': luminance_std.squeeze(1),
+        }
+
+    @classmethod
+    def _reference_skin_tone_terms(
+        cls,
+        predictions,
+        inputs,
+        reference,
+        min_fraction=0.005,
+        max_fraction=0.5,
+        std_weight=0.25,
+        luminance_weight=0.15,
+        uniformity_weight=0.25,
+        red_overshoot_weight=0.5,
+        local_red_weight=0.5,
+        red_overshoot_margin=0.03,
+        local_red_threshold=0.1823215568,
+        local_red_tail_fraction=0.02,
+    ):
+        """Match non-aligned skin statistics while protecting local uniformity."""
+        if not 0 < min_fraction <= max_fraction <= 1:
+            raise ValueError(
+                "skin fractions must satisfy 0 < min_fraction <= "
+                "max_fraction <= 1"
+            )
+        input_mask = cls._soft_skin_mask(inputs)
+        reference_mask = cls._soft_skin_mask(reference)
+        reduce_dims = (1, 2, 3)
+        input_fraction = (
+            (input_mask > 0.25).float().mean(dim=reduce_dims)
+        ).detach()
+        reference_fraction = (
+            (reference_mask > 0.25).float().mean(dim=reduce_dims)
+        ).detach()
+        valid = (
+            (input_fraction >= min_fraction)
+            & (reference_fraction >= min_fraction)
+            & (input_fraction <= max_fraction)
+            & (reference_fraction <= max_fraction)
+        ).detach()
+        valid_weight = valid.float()
+        valid_denominator = valid_weight.sum().clamp_min(1.0)
+
+        def valid_mean(values):
+            return (values * valid_weight).sum() / valid_denominator
+
+        prediction_stats = cls._weighted_skin_statistics(
+            predictions,
+            input_mask,
+        )
+        input_stats = cls._weighted_skin_statistics(
+            inputs.detach(),
+            input_mask,
+        )
+        reference_stats = {
+            key: value.detach()
+            for key, value in cls._weighted_skin_statistics(
+                reference.detach(),
+                reference_mask,
+            ).items()
+        }
+        chroma_delta = (
+            prediction_stats['chroma_mean']
+            - reference_stats['chroma_mean']
+        )
+        chroma_std_delta = (
+            prediction_stats['chroma_std']
+            - reference_stats['chroma_std']
+        )
+        luminance_delta = (
+            prediction_stats['luminance_mean']
+            - reference_stats['luminance_mean']
+        )
+        luminance_std_delta = (
+            prediction_stats['luminance_std']
+            - reference_stats['luminance_std']
+        )
+        chroma_loss = cls._charbonnier(chroma_delta).mean(dim=1)
+        spread_loss = cls._charbonnier(chroma_std_delta).mean(dim=1)
+        luminance_loss = (
+            cls._charbonnier(luminance_delta)
+            + 0.25 * cls._charbonnier(luminance_std_delta)
+        )
+        tone_loss = (
+            chroma_loss
+            + std_weight * spread_loss
+            + luminance_weight * luminance_loss
+        )
+
+        skin_shift = (
+            prediction_stats['chroma_map']
+            - input_stats['chroma_map'].detach()
+        )
+        mask_sum = input_mask.sum(
+            dim=(2, 3),
+            keepdim=True,
+        ).clamp_min(1e-6)
+        mean_skin_shift = (
+            (input_mask * skin_shift).sum(
+                dim=(2, 3),
+                keepdim=True,
+            )
+            / mask_sum
+        )
+        local_skin_residual = skin_shift - mean_skin_shift
+        uniformity_pixels = cls._charbonnier(
+            local_skin_residual
+        ).mean(dim=1, keepdim=True)
+        uniformity_loss = (
+            (input_mask * uniformity_pixels).sum(dim=(1, 2, 3))
+            / input_mask.sum(dim=(1, 2, 3)).clamp_min(1e-6)
+        )
+
+        red_green_delta = chroma_delta[:, 0]
+        blue_green_delta = chroma_delta[:, 1]
+        red_overshoot = cls._charbonnier(
+            F.relu(red_green_delta - red_overshoot_margin)
+        )
+        local_red_residual = local_skin_residual[:, :1]
+        softness = 0.03
+        local_red_excess = softness * F.softplus(
+            (local_red_residual - local_red_threshold) / softness
+        )
+        local_red_tail_values = []
+        hard_skin_mask = input_mask > 0.25
+        for batch_index in range(predictions.shape[0]):
+            candidate_excess = local_red_excess[
+                batch_index,
+                0,
+            ][hard_skin_mask[batch_index, 0]]
+            if candidate_excess.numel() == 0:
+                local_red_tail_values.append(
+                    predictions[batch_index].sum() * 0
+                )
+                continue
+            tail_count = max(
+                1,
+                math.ceil(
+                    candidate_excess.numel() * local_red_tail_fraction
+                ),
+            )
+            local_red_tail_values.append(
+                candidate_excess.topk(tail_count).values.mean()
+            )
+        local_red_tail = torch.stack(local_red_tail_values)
+        local_red_bad_fraction = (
+            (
+                input_mask
+                * (local_red_residual > local_red_threshold).float()
+            ).sum(dim=(1, 2, 3))
+            / input_mask.sum(dim=(1, 2, 3)).clamp_min(1e-6)
+        )
+        total_loss = (
+            tone_loss
+            + uniformity_weight * uniformity_loss
+            + red_overshoot_weight * red_overshoot
+            + local_red_weight * local_red_tail
+        )
+        warm_delta = 0.5 * (red_green_delta - blue_green_delta)
+        tint_delta = 0.5 * (red_green_delta + blue_green_delta)
+        luminance_ratio = luminance_delta.clamp(-5, 5).exp()
+        return {
+            'loss': valid_mean(total_loss),
+            'tone_loss': valid_mean(tone_loss),
+            'chroma_loss': valid_mean(chroma_loss),
+            'spread_loss': valid_mean(spread_loss),
+            'luminance_loss': valid_mean(luminance_loss),
+            'uniformity_loss': valid_mean(uniformity_loss),
+            'red_overshoot': valid_mean(red_overshoot),
+            'local_red_tail': valid_mean(local_red_tail),
+            'local_red_bad_fraction': valid_mean(
+                local_red_bad_fraction
+            ),
+            'red_green_delta': valid_mean(red_green_delta),
+            'blue_green_delta': valid_mean(blue_green_delta),
+            'warm_delta': valid_mean(warm_delta),
+            'tint_delta': valid_mean(tint_delta),
+            'luminance_ratio': valid_mean(luminance_ratio),
+            'input_fraction': input_fraction.mean(),
+            'reference_fraction': reference_fraction.mean(),
+            'valid_fraction': valid_weight.mean(),
+            'input_mask': input_mask,
+        }
+
+    def _configured_reference_skin_tone_terms(
+        self,
+        predictions,
+        inputs,
+        reference,
+    ):
+        return self._reference_skin_tone_terms(
+            predictions,
+            inputs,
+            reference,
+            min_fraction=self.reference_skin_min_fraction,
+            max_fraction=self.reference_skin_max_fraction,
+            std_weight=self.reference_skin_std_weight,
+            luminance_weight=self.reference_skin_luminance_weight,
+            uniformity_weight=self.reference_skin_uniformity_weight,
+            red_overshoot_weight=(
+                self.reference_skin_red_overshoot_weight
+            ),
+            local_red_weight=self.reference_skin_local_red_weight,
+            red_overshoot_margin=(
+                self.reference_skin_red_overshoot_margin
+            ),
+            local_red_threshold=self.reference_local_red_threshold,
+            local_red_tail_fraction=(
+                self.reference_local_red_tail_fraction
+            ),
+        )
+
+    @staticmethod
+    def _zero_reference_skin_tone_terms(predictions):
+        zero = predictions.sum() * 0
+        terms = {
+            name: zero
+            for name in (
+                'loss',
+                'tone_loss',
+                'chroma_loss',
+                'spread_loss',
+                'luminance_loss',
+                'uniformity_loss',
+                'red_overshoot',
+                'local_red_tail',
+                'local_red_bad_fraction',
+                'red_green_delta',
+                'blue_green_delta',
+                'warm_delta',
+                'tint_delta',
+                'luminance_ratio',
+                'input_fraction',
+                'reference_fraction',
+                'valid_fraction',
+            )
+        }
+        terms['input_mask'] = predictions.new_zeros(
+            (
+                predictions.shape[0],
+                1,
+                predictions.shape[2],
+                predictions.shape[3],
+            )
+        )
+        return terms
+
+    @staticmethod
     def _ramped_weight(weight, ramp_epochs, current_epoch):
         if ramp_epochs <= 0:
             return weight
@@ -343,6 +704,13 @@ class UnsupervisedPipeline(L.LightningModule):
         return self._ramped_weight(
             self.reference_white_balance_weight,
             self.reference_white_balance_ramp_epochs,
+            self.current_epoch,
+        )
+
+    def _effective_reference_skin_tone_weight(self):
+        return self._ramped_weight(
+            self.reference_skin_tone_weight,
+            self.reference_skin_tone_ramp_epochs,
             self.current_epoch,
         )
 
@@ -471,6 +839,7 @@ class UnsupervisedPipeline(L.LightningModule):
         red_tail_fraction=0.02,
         chroma_threshold=0.25,
         red_threshold=0.1823215568,
+        spatial_weights=None,
         eps=1e-3,
     ):
         """Measure local color drift after removing a robust global color gain."""
@@ -493,6 +862,11 @@ class UnsupervisedPipeline(L.LightningModule):
             torch.sigmoid((input_luminance - 0.01) / 0.01)
             * torch.sigmoid((0.98 - input_luminance) / 0.02)
         ).unsqueeze(1).detach()
+        if spatial_weights is not None:
+            weights = (
+                weights
+                * spatial_weights.detach().to(weights).clamp(0, 1)
+            )
         reduce_dims = (2, 3)
         initial_global_delta = (
             (weights * chroma_delta).sum(dim=reduce_dims, keepdim=True)
@@ -948,6 +1322,25 @@ class UnsupervisedPipeline(L.LightningModule):
         effectiveReferenceWhiteBalanceWeight = (
             self._effective_reference_white_balance_weight()
         )
+        useSkinToneObjective = self.reference_skin_tone_weight > 0
+        if useSkinToneObjective:
+            skinTermsA = self._configured_reference_skin_tone_terms(
+                fakeA,
+                imgB,
+                imgA,
+            )
+            skinTermsB = self._configured_reference_skin_tone_terms(
+                fakeB,
+                imgA,
+                imgB,
+            )
+        else:
+            skinTermsA = self._zero_reference_skin_tone_terms(fakeA)
+            skinTermsB = self._zero_reference_skin_tone_terms(fakeB)
+        referenceSkinToneLoss = skinTermsA['loss'] + skinTermsB['loss']
+        effectiveReferenceSkinToneWeight = (
+            self._effective_reference_skin_tone_weight()
+        )
         useLocalChromaGuard = any(
             weight > 0
             for weight in (
@@ -966,6 +1359,11 @@ class UnsupervisedPipeline(L.LightningModule):
                 red_tail_fraction=self.reference_local_red_tail_fraction,
                 chroma_threshold=self.reference_local_chroma_threshold,
                 red_threshold=self.reference_local_red_threshold,
+                spatial_weights=(
+                    1 - skinTermsA['input_mask']
+                    if useSkinToneObjective
+                    else None
+                ),
             )
             localTermsB = self._local_chroma_terms(
                 fakeB,
@@ -976,6 +1374,11 @@ class UnsupervisedPipeline(L.LightningModule):
                 red_tail_fraction=self.reference_local_red_tail_fraction,
                 chroma_threshold=self.reference_local_chroma_threshold,
                 red_threshold=self.reference_local_red_threshold,
+                spatial_weights=(
+                    1 - skinTermsB['input_mask']
+                    if useSkinToneObjective
+                    else None
+                ),
             )
         else:
             zero = fakeA.new_zeros(())
@@ -1035,6 +1438,7 @@ class UnsupervisedPipeline(L.LightningModule):
             + self.patch_nce_weight * patchNceLoss
             + self.reference_style_weight * referenceStyleLoss
             + effectiveReferenceWhiteBalanceWeight * referenceWhiteBalanceLoss
+            + effectiveReferenceSkinToneWeight * referenceSkinToneLoss
             + self.reference_local_chroma_weight * referenceLocalChromaLoss
             + (
                 self.reference_local_chroma_tail_weight
@@ -1089,6 +1493,36 @@ class UnsupervisedPipeline(L.LightningModule):
         self._log_loss(
             'gen_reference_white_balance_b_loss',
             referenceWhiteBalanceB,
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_skin_tone_a_loss',
+            skinTermsA['loss'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_skin_tone_b_loss',
+            skinTermsB['loss'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_skin_uniformity_b_loss',
+            skinTermsB['uniformity_loss'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_skin_red_overshoot_b_loss',
+            skinTermsB['red_overshoot'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_skin_local_red_tail_b_loss',
+            skinTermsB['local_red_tail'],
+            batch_size,
+        )
+        self._log_loss(
+            'gen_reference_skin_valid_fraction_b',
+            skinTermsB['valid_fraction'],
             batch_size,
         )
         self._log_loss(
@@ -1168,6 +1602,11 @@ class UnsupervisedPipeline(L.LightningModule):
         self._log_loss(
             'effective_reference_white_balance_weight',
             fakeB.new_tensor(effectiveReferenceWhiteBalanceWeight),
+            batch_size,
+        )
+        self._log_loss(
+            'effective_reference_skin_tone_weight',
+            fakeB.new_tensor(effectiveReferenceSkinToneWeight),
             batch_size,
         )
         self._log_loss('gen_range_a_loss', rangeA, batch_size)
@@ -1369,6 +1808,36 @@ class UnsupervisedPipeline(L.LightningModule):
         effective_reference_white_balance_weight = (
             self._effective_reference_white_balance_weight()
         )
+        use_skin_tone_objective = self.reference_skin_tone_weight > 0
+        if use_skin_tone_objective:
+            fake_source_skin_terms = (
+                self._configured_reference_skin_tone_terms(
+                    fake_source,
+                    target,
+                    source,
+                )
+            )
+            fake_target_skin_terms = (
+                self._configured_reference_skin_tone_terms(
+                    fake_target,
+                    source,
+                    target,
+                )
+            )
+        else:
+            fake_source_skin_terms = (
+                self._zero_reference_skin_tone_terms(fake_source)
+            )
+            fake_target_skin_terms = (
+                self._zero_reference_skin_tone_terms(fake_target)
+            )
+        reference_skin_tone_loss = (
+            fake_source_skin_terms['loss']
+            + fake_target_skin_terms['loss']
+        )
+        effective_reference_skin_tone_weight = (
+            self._effective_reference_skin_tone_weight()
+        )
         use_local_chroma_guard = any(
             weight > 0
             for weight in (
@@ -1387,6 +1856,11 @@ class UnsupervisedPipeline(L.LightningModule):
                 red_tail_fraction=self.reference_local_red_tail_fraction,
                 chroma_threshold=self.reference_local_chroma_threshold,
                 red_threshold=self.reference_local_red_threshold,
+                spatial_weights=(
+                    1 - fake_source_skin_terms['input_mask']
+                    if use_skin_tone_objective
+                    else None
+                ),
             )
             fake_target_local_terms = self._local_chroma_terms(
                 fake_target,
@@ -1397,6 +1871,11 @@ class UnsupervisedPipeline(L.LightningModule):
                 red_tail_fraction=self.reference_local_red_tail_fraction,
                 chroma_threshold=self.reference_local_chroma_threshold,
                 red_threshold=self.reference_local_red_threshold,
+                spatial_weights=(
+                    1 - fake_target_skin_terms['input_mask']
+                    if use_skin_tone_objective
+                    else None
+                ),
             )
         else:
             zero = fake_source.new_zeros(())
@@ -1456,6 +1935,10 @@ class UnsupervisedPipeline(L.LightningModule):
                 effective_reference_white_balance_weight
                 * reference_white_balance_loss
             )
+            + (
+                effective_reference_skin_tone_weight
+                * reference_skin_tone_loss
+            )
             + self.reference_local_chroma_weight * reference_local_chroma_loss
             + (
                 self.reference_local_chroma_tail_weight
@@ -1508,11 +1991,32 @@ class UnsupervisedPipeline(L.LightningModule):
                 fake_target_luminance
                 / real_target_luminance.clamp_min(1e-6)
             )
+            if use_skin_tone_objective:
+                source_target_skin_terms = (
+                    self._configured_reference_skin_tone_terms(
+                        source,
+                        source,
+                        target,
+                    )
+                )
+            else:
+                source_target_skin_terms = (
+                    self._zero_reference_skin_tone_terms(source)
+                )
+            selection_style_weight = (
+                5.0 if use_skin_tone_objective else 10.0
+            )
+            skin_selection_loss = (
+                4.0 * fake_target_skin_terms['loss']
+                if use_skin_tone_objective
+                else fake_target.new_zeros(())
+            )
             # Fixed-weight checkpoint score. It deliberately excludes the
             # discriminator because GAN scores change as D learns and are not
             # comparable across the warmup/ramp/full-training phases.
             reference_selection_loss = (
-                10.0 * fake_distance
+                selection_style_weight * fake_distance
+                + skin_selection_loss
                 + cycle_loss
                 + identity_loss
                 + reference_white_balance_loss
@@ -1562,6 +2066,20 @@ class UnsupervisedPipeline(L.LightningModule):
             f'{stage}_effective_reference_white_balance_weight',
             reference_white_balance_loss.new_tensor(
                 effective_reference_white_balance_weight
+            ),
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_reference_skin_tone_loss',
+            reference_skin_tone_loss,
+            prog_bar=False,
+            logger=True,
+        )
+        self.log(
+            f'{stage}_effective_reference_skin_tone_weight',
+            reference_skin_tone_loss.new_tensor(
+                effective_reference_skin_tone_weight
             ),
             prog_bar=False,
             logger=True,
@@ -1663,6 +2181,67 @@ class UnsupervisedPipeline(L.LightningModule):
                 prog_bar=False,
                 logger=True,
             )
+            skin_log_values = {
+                'fake_target_skin_loss': fake_target_skin_terms['loss'],
+                'fake_target_skin_tone_loss': (
+                    fake_target_skin_terms['tone_loss']
+                ),
+                'fake_target_skin_chroma_loss': (
+                    fake_target_skin_terms['chroma_loss']
+                ),
+                'fake_target_skin_spread_loss': (
+                    fake_target_skin_terms['spread_loss']
+                ),
+                'fake_target_skin_luminance_loss': (
+                    fake_target_skin_terms['luminance_loss']
+                ),
+                'fake_target_skin_uniformity_loss': (
+                    fake_target_skin_terms['uniformity_loss']
+                ),
+                'fake_target_skin_red_overshoot': (
+                    fake_target_skin_terms['red_overshoot']
+                ),
+                'fake_target_skin_local_red_tail': (
+                    fake_target_skin_terms['local_red_tail']
+                ),
+                'fake_target_skin_local_red_bad_fraction': (
+                    fake_target_skin_terms['local_red_bad_fraction']
+                ),
+                'fake_target_skin_red_green_delta': (
+                    fake_target_skin_terms['red_green_delta']
+                ),
+                'fake_target_skin_blue_green_delta': (
+                    fake_target_skin_terms['blue_green_delta']
+                ),
+                'fake_target_skin_warm_delta': (
+                    fake_target_skin_terms['warm_delta']
+                ),
+                'fake_target_skin_tint_delta': (
+                    fake_target_skin_terms['tint_delta']
+                ),
+                'fake_target_skin_luminance_ratio': (
+                    fake_target_skin_terms['luminance_ratio']
+                ),
+                'source_target_skin_tone_loss': (
+                    source_target_skin_terms['tone_loss']
+                ),
+                'source_skin_fraction': (
+                    fake_target_skin_terms['input_fraction']
+                ),
+                'target_skin_fraction': (
+                    fake_target_skin_terms['reference_fraction']
+                ),
+                'fake_target_skin_valid_fraction': (
+                    fake_target_skin_terms['valid_fraction']
+                ),
+            }
+            for metric_name, metric_value in skin_log_values.items():
+                self.log(
+                    f'{stage}_{metric_name}',
+                    metric_value,
+                    prog_bar=False,
+                    logger=True,
+                )
             (
                 red_green_delta,
                 blue_green_delta,
